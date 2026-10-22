@@ -1,0 +1,13 @@
+services:
+  oglasnik:
+    image: oglasnik:latest
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /data/seen.sqlite
+    volumes:
+      - oglasnik-data:/data
+    restart: unless-stopped
+
+volumes:
+  oglasnik-data:

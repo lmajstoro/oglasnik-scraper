@@ -1,0 +1,11 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+data/
+*.sqlite
+*.sqlite-journal
+sample.json
+pages.json
+oglasnik.tar

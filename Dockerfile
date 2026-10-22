@@ -5,7 +5,7 @@ WORKDIR /opt/oglasnik
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py scraper.py store.py mailer.py ./
+COPY main.py scraper.py store.py mailer.py plavi.py ./
 
 RUN useradd --system --create-home --uid 10001 oglasnik \
     && mkdir -p /data \

@@ -1,4 +1,5 @@
 import logging
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mailer import format_dt, format_price, render_html, render_plain
 from main import _ZagrebFormatter, _check_lines, _period_label
+from plavi import classify_plavi, extract_ads, listing_from_ad
 from scraper import Listing, _next_page, is_renewal, parse_time, should_stop
 from store import Store
 
@@ -169,6 +171,16 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(body.count("Otvori oglas"), 4)
         self.assertIn("09:15", body)
 
+    def test_plavi_mail_uses_blue_theme(self):
+        checked = datetime(2026, 10, 22, 7, 15, tzinfo=timezone.utc)
+        body = render_html([listing()], checked, source="plavi")
+        plain = render_plain([listing()], checked, source="plavi")
+        self.assertIn("#0E6EB8", body)
+        self.assertIn("Novi oglasi – Plavi oglasnik", body)
+        self.assertIn("oglasnik.hr – automatski izvještaj", body)
+        self.assertNotIn("#e30613", body)
+        self.assertIn("Novi oglasi – Plavi oglasnik", plain)
+
 
 class ParseTests(unittest.TestCase):
     def test_api_payload(self):
@@ -232,6 +244,74 @@ class StoreTests(unittest.TestCase):
             ).fetchone()
             self.assertIsNone(remembered["sent_at"])
             store.close()
+
+    def test_same_code_can_exist_for_both_sources(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / "seen.sqlite")
+            conn = sqlite3.connect(path)
+            conn.executescript(
+                """
+                CREATE TABLE seen (
+                    code INTEGER PRIMARY KEY,
+                    posted_at TEXT NOT NULL,
+                    renewed_at TEXT,
+                    sent_at TEXT,
+                    title TEXT NOT NULL,
+                    url TEXT NOT NULL
+                );
+                CREATE TABLE meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                INSERT INTO seen VALUES (
+                    5, '2026-10-22T10:00:00+00:00', NULL, NULL, 'Stan', 'https://index.example/5'
+                );
+                INSERT INTO meta VALUES ('baseline_complete', '1');
+                INSERT INTO meta VALUES ('last_success_at', '2026-10-22T10:00:00+00:00');
+                """
+            )
+            conn.close()
+            index = Store(path, "index")
+            plavi = Store(path, "plavi")
+            self.assertTrue(index.baseline_complete())
+            self.assertEqual(index.last_success(), datetime(2026, 10, 22, 10, 0, tzinfo=timezone.utc))
+            self.assertEqual(index.codes(), {5})
+            self.assertFalse(plavi.baseline_complete())
+            self.assertEqual(plavi.codes(), set())
+            plavi.remember([listing(code=5, title="Plavi stan")])
+            self.assertEqual(plavi.codes(), {5})
+            self.assertEqual(index.count(), 1)
+            self.assertEqual(plavi.count(), 1)
+            published, renewed = classify_plavi(
+                [listing(code=9), listing(code=4)],
+                plavi.max_code(),
+            )
+            self.assertEqual([item.code for item in published], [9])
+            self.assertEqual([item.code for item in renewed], [4])
+            index.close()
+            plavi.close()
+
+
+class PlaviParseTests(unittest.TestCase):
+    def test_extract_ad_keeps_braces_inside_title(self):
+        raw = (
+            '{"ad":{"id":5,"title":"Stan {centar}","sort_date":1792653674,'
+            '"price":{"value":100000},"location":[{"name":"Hrvatska"},'
+            '{"name":"Grad Zagreb"},{"name":"Novi Zagreb"},{"name":"Blato"}],'
+            '"user":{"type":"trgovina"},"searchable":{"re_total_area":50}}}'
+        )
+        ads = extract_ads(raw.replace('"', '\\"'))
+        self.assertEqual(len(ads), 1)
+        item = listing_from_ad(ads[0], "https://oglasnik.hr/stanovi-prodaja/stan-oglas-5")
+        self.assertEqual(item.title, "Stan {centar}")
+        self.assertEqual(item.code, 5)
+        self.assertTrue(item.legal_entity)
+        self.assertEqual(item.county, "Grad Zagreb")
+        self.assertEqual(item.city, "Novi Zagreb")
+        self.assertEqual(item.settlement, "Blato")
+        self.assertEqual(item.price, 100000)
+        self.assertEqual(item.area, 50)
+        self.assertEqual(item.price_m2, 2000)
 
 
 if __name__ == "__main__":

@@ -29,23 +29,19 @@ def send_listings(
     checked_at: datetime,
     *,
     test: bool = False,
+    source: str = "index",
 ) -> None:
     if not listings:
         return
     count = len(listings)
     note = test_note(count) if test else None
-    if test and count == 1:
-        subject = "Test: novi oglas za stanove"
-    elif test:
-        subject = f"Test: novi oglasi za stanove ({count})"
-    else:
-        subject = f"Novi oglasi za stanove ({count})"
+    subject = _subject(count, test=test, source=source)
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = config.mail_from
     message["To"] = config.mail_to
-    message.set_content(render_plain(listings, checked_at, note), charset="utf-8")
-    message.add_alternative(render_html(listings, checked_at, note), subtype="html")
+    message.set_content(render_plain(listings, checked_at, note, source=source), charset="utf-8")
+    message.add_alternative(render_html(listings, checked_at, note, source=source), subtype="html")
     try:
         with connect(config) as smtp:
             smtp.send_message(message)
@@ -71,7 +67,12 @@ def check_smtp(config) -> None:
         raise MailError(f"SMTP provjera nije uspjela: {exc}") from exc
 
 
-def render_plain(listings: list[Listing], checked_at: datetime, note: str | None = None) -> str:
+def render_plain(
+    listings: list[Listing],
+    checked_at: datetime,
+    note: str | None = None,
+    source: str = "index",
+) -> str:
     ordered = _ordered(listings)
     blocks = []
     for listing in ordered:
@@ -88,8 +89,9 @@ def render_plain(listings: list[Listing], checked_at: datetime, note: str | None
                 ]
             )
         )
+    theme = _theme(source)
     header = (
-        "Novi oglasi – Index nekretnine\n"
+        f"{theme['title']}\n"
         f"{found_label(len(ordered))}\n"
         f"Provjera: {format_dt(checked_at)}"
     )
@@ -98,9 +100,15 @@ def render_plain(listings: list[Listing], checked_at: datetime, note: str | None
     return header + "\n\n" + "\n\n".join(blocks) + "\n"
 
 
-def render_html(listings: list[Listing], checked_at: datetime, note: str | None = None) -> str:
+def render_html(
+    listings: list[Listing],
+    checked_at: datetime,
+    note: str | None = None,
+    source: str = "index",
+) -> str:
     ordered = _ordered(listings)
-    rows = "\n".join(_row(listing) for listing in ordered)
+    theme = _theme(source)
+    rows = "\n".join(_row(listing, theme["link"]) for listing in ordered)
     note_html = ""
     if note:
         note_html = (
@@ -121,9 +129,9 @@ def render_html(listings: list[Listing], checked_at: datetime, note: str | None 
       <td align="center" style="padding:24px 12px;">
         <table role="presentation" width="640" cellpadding="0" cellspacing="0" style="width:100%;max-width:640px;background:#ffffff;border:1px solid #e5e7eb;border-radius:16px;">
           <tr>
-            <td bgcolor="#e30613" style="background:#e30613;padding:22px 28px;border-radius:16px 16px 0 0;">
-              <div style="font-family:Arial,Helvetica,sans-serif;font-size:22px;line-height:1.3;font-weight:700;color:#ffffff;">Novi oglasi – Index nekretnine</div>
-              <div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.4;color:#ffd5d5;padding-top:6px;">Nove objave</div>
+            <td bgcolor="{theme['header']}" style="background:{theme['header']};padding:22px 28px;border-radius:16px 16px 0 0;">
+              <div style="font-family:Arial,Helvetica,sans-serif;font-size:22px;line-height:1.3;font-weight:700;color:#ffffff;">{html.escape(theme['title'])}</div>
+              <div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.4;color:{theme['sub']};padding-top:6px;">Nove objave</div>
             </td>
           </tr>
           <tr>
@@ -148,7 +156,7 @@ def render_html(listings: list[Listing], checked_at: datetime, note: str | None 
             <td style="padding:8px 28px 18px;border-top:1px solid #f3f4f6;">
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
                 <tr>
-                  <td style="font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#9ca3af;">Index.hr oglasi – automatski izvještaj</td>
+                  <td style="font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#9ca3af;">{html.escape(theme['footer'])}</td>
                   <td align="right" style="font-family:Arial,Helvetica,sans-serif;font-size:18px;font-weight:700;color:#4b5563;white-space:nowrap;">{html.escape(format_clock(checked_at))}</td>
                 </tr>
               </table>
@@ -163,7 +171,39 @@ def render_html(listings: list[Listing], checked_at: datetime, note: str | None 
 """
 
 
-def _row(listing: Listing) -> str:
+def _subject(count: int, *, test: bool, source: str) -> str:
+    if source == "plavi":
+        if test and count == 1:
+            return "Test: novi oglas, Plavi oglasnik"
+        if test:
+            return f"Test: novi oglasi, Plavi oglasnik ({count})"
+        return f"Novi oglasi, Plavi oglasnik ({count})"
+    if test and count == 1:
+        return "Test: novi oglas za stanove"
+    if test:
+        return f"Test: novi oglasi za stanove ({count})"
+    return f"Novi oglasi za stanove ({count})"
+
+
+def _theme(source: str) -> dict[str, str]:
+    if source == "plavi":
+        return {
+            "title": "Novi oglasi – Plavi oglasnik",
+            "header": "#0E6EB8",
+            "sub": "#d6ebfa",
+            "link": "#0E6EB8",
+            "footer": "oglasnik.hr – automatski izvještaj",
+        }
+    return {
+        "title": "Novi oglasi – Index nekretnine",
+        "header": "#e30613",
+        "sub": "#ffd5d5",
+        "link": "#1d4ed8",
+        "footer": "Index.hr oglasi – automatski izvještaj",
+    }
+
+
+def _row(listing: Listing, link_color: str = "#1d4ed8") -> str:
     title, url, location, price, per_m2, label = _bits(listing)
     per_m2_html = ""
     if per_m2 != "—":
@@ -180,7 +220,7 @@ def _row(listing: Listing) -> str:
                     {price}{per_m2_html}
                   </td>
                   <td align="right" style="padding:14px 12px;border-bottom:1px solid #f3f4f6;vertical-align:top;white-space:nowrap;">
-                    <a href="{url}" style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1d4ed8;text-decoration:underline;">Otvori oglas</a>
+                    <a href="{url}" style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:{link_color};text-decoration:underline;">Otvori oglas</a>
                   </td>
                 </tr>"""
 

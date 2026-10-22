@@ -176,12 +176,14 @@ class IndexClient:
                 total_hint = total
             if not items:
                 break
+            before = len(found)
             for item in items:
                 found.setdefault(item.code, item)
-            log.debug(
-                "Stranica %s: %s oglasa (ukupno pročitano %s%s)",
+            logger = log.info if full else log.debug
+            logger(
+                "Index, stranica %s: %s oglasa (ukupno pročitano %s%s)",
                 page,
-                len(items),
+                len(found) - before,
                 len(found),
                 f" od {total_hint}" if total_hint else "",
             )

@@ -11,8 +11,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from mailer import ZAGREB, MailError, check_smtp, send_listings
+from plavi import PlaviClient, classify_plavi
 from scraper import IndexClient, ScraperError, is_renewal
-from store import Store
+from store import PLAVI, INDEX, Store
 
 ROOT = Path(__file__).resolve().parent
 log = logging.getLogger("oglasnik")
@@ -32,10 +33,18 @@ class Config:
     test_listing_count: int
 
 
+@dataclass(frozen=True)
+class Watch:
+    source: str
+    label: str
+    store: Store
+    client: IndexClient | PlaviClient
+
+
 def main() -> None:
     _configure_output()
     handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(_ZagrebFormatter("INFO: %(message)s"))
+    handler.setFormatter(_ZagrebFormatter("%(asctime)s INFO: %(message)s", "%d.%m.%Y %H:%M:%S"))
     logging.basicConfig(level=logging.INFO, handlers=[handler])
     config = load_config()
     try:
@@ -43,60 +52,74 @@ def main() -> None:
     except MailError as exc:
         raise SystemExit(str(exc)) from exc
     log.info("SMTP prijava uspjela. Mail ide na %s.", config.mail_to)
-    store = Store(config.database_path)
-    client = IndexClient(page_delay_seconds=config.page_delay_seconds)
+    path = config.database_path
+    watches = [
+        Watch(INDEX, "Index", Store(path, INDEX), IndexClient(config.page_delay_seconds)),
+        Watch(PLAVI, "Plavi oglasnik", Store(path, PLAVI), PlaviClient(config.page_delay_seconds)),
+    ]
     interval = config.interval_minutes * 60
     log.info("Interval provjere je %s min.", config.interval_minutes)
     try:
         while True:
-            try:
-                if not store.baseline_complete():
-                    run_baseline(store, client)
-                if not store.test_sent():
-                    send_test(config, store, client)
-                else:
-                    run_check(config, store, client)
-            except KeyboardInterrupt:
-                raise
-            except (ScraperError, MailError, OSError) as exc:
-                log.error("Ciklus nije uspio: %s", exc)
-                log.info("Zadnji uspjeh ostaje. Novi pokušaj nakon intervala.")
-            except Exception:
-                log.exception("Ciklus nije uspio. Novi pokušaj nakon intervala.")
+            for watch in watches:
+                _run_watch(config, watch)
             time.sleep(interval)
     except KeyboardInterrupt:
         log.info("Zaustavljeno.")
     finally:
-        store.close()
+        for watch in watches:
+            watch.store.close()
 
 
-def run_baseline(store: Store, client: IndexClient) -> None:
+def _run_watch(config: Config, watch: Watch) -> None:
+    try:
+        if not watch.store.baseline_complete():
+            run_baseline(watch)
+        if not watch.store.test_sent():
+            send_test(config, watch)
+        else:
+            run_check(config, watch)
+    except KeyboardInterrupt:
+        raise
+    except (ScraperError, MailError, OSError) as exc:
+        log.error("%s: ciklus nije uspio: %s", watch.label, exc)
+        log.info("%s: zadnji uspjeh ostaje. Novi pokušaj nakon intervala.", watch.label)
+    except Exception:
+        log.exception("%s: ciklus nije uspio. Novi pokušaj nakon intervala.", watch.label)
+
+
+def run_baseline(watch: Watch) -> None:
     started = datetime.now(timezone.utc)
-    log.info("Prvi prolaz sprema postojeće oglase. Mail se ne šalje.")
-    listings = client.fetch_all()
-    added = store.save_baseline(listings)
-    store.set_last_success(started)
-    log.info("Baseline spremljen: %s zapisa, %s ukupno u bazi.", added, store.count())
+    log.info("%s: prvi prolaz sprema postojeće oglase. Mail se ne šalje.", watch.label)
+    listings = watch.client.fetch_all()
+    added = watch.store.save_baseline(listings)
+    watch.store.set_last_success(started)
+    log.info(
+        "%s: baseline spremljen, %s zapisa, %s ukupno.",
+        watch.label,
+        added,
+        watch.store.count(),
+    )
 
 
-def send_test(config: Config, store: Store, client: IndexClient) -> None:
+def send_test(config: Config, watch: Watch) -> None:
     count = config.test_listing_count
     if count == 0:
-        store.mark_test_sent()
-        log.info("TEST_LISTING_COUNT je 0, testni mail se ne šalje.")
+        watch.store.mark_test_sent()
+        log.info("%s: TEST_LISTING_COUNT je 0, testni mail se ne šalje.", watch.label)
         return
-    samples = _sample_listings(client, count)
+    samples = _sample_listings(watch.client, count)
     if not samples:
-        raise ScraperError("Nema oglasa za testni mail.")
+        raise ScraperError(f"{watch.label}: nema oglasa za testni mail.")
     if len(samples) < count:
-        log.info("Za test je dostupno %s oglasa, ne %s.", len(samples), count)
-    log.info("Šaljem testni mail s %s oglasa.", len(samples))
-    send_listings(config, samples, datetime.now(timezone.utc), test=True)
-    store.mark_test_sent()
-    log.info("Testni mail je poslan. Ti oglasi se neće ponoviti.")
+        log.info("%s: za test je dostupno %s oglasa, ne %s.", watch.label, len(samples), count)
+    log.info("%s: šaljem testni mail s %s oglasa.", watch.label, len(samples))
+    send_listings(config, samples, datetime.now(timezone.utc), test=True, source=watch.source)
+    watch.store.mark_test_sent()
+    log.info("%s: testni mail je poslan. Ti oglasi se neće ponoviti.", watch.label)
 
 
-def _sample_listings(client: IndexClient, count: int) -> list:
+def _sample_listings(client: IndexClient | PlaviClient, count: int) -> list:
     found = []
     seen: set[int] = set()
     page = 1
@@ -113,22 +136,21 @@ def _sample_listings(client: IndexClient, count: int) -> list:
     return found
 
 
-def run_check(config: Config, store: Store, client: IndexClient) -> None:
+def run_check(config: Config, watch: Watch) -> None:
     started = datetime.now(timezone.utc)
-    period = _period_label(store.last_success(), started)
-    _write_check_header(period)
+    period = _period_label(watch.store.last_success(), started)
+    _write_check_header(period, watch.label)
     try:
-        known = store.codes()
-        listings = client.fetch_recent(known, store.last_success())
+        known = watch.store.codes()
+        listings = watch.client.fetch_recent(known, watch.store.last_success())
         fresh = [listing for listing in listings if listing.code not in known]
-        renewed = [listing for listing in fresh if is_renewal(listing)]
-        published = [listing for listing in fresh if not is_renewal(listing)]
+        published, renewed = _split(watch, fresh)
         if published:
-            send_listings(config, published, started)
-            store.mark_sent(published, datetime.now(timezone.utc))
+            send_listings(config, published, started, source=watch.source)
+            watch.store.mark_sent(published, datetime.now(timezone.utc))
         if renewed:
-            store.remember(renewed)
-        store.set_last_success(started)
+            watch.store.remember(renewed)
+        watch.store.set_last_success(started)
     except (ScraperError, MailError, OSError):
         log.info("Provjera nije uspjela. Mail nije poslan.")
         return
@@ -140,13 +162,21 @@ def run_check(config: Config, store: Store, client: IndexClient) -> None:
         log.info("%s", line)
 
 
+def _split(watch: Watch, fresh: list) -> tuple[list, list]:
+    if watch.source == PLAVI:
+        return classify_plavi(fresh, watch.store.max_code())
+    renewed = [item for item in fresh if is_renewal(item)]
+    published = [item for item in fresh if not is_renewal(item)]
+    return published, renewed
+
+
 RULE = "-----------------------------------------------------------"
 
 
-def _write_check_header(period: str) -> None:
-    print(RULE, flush=True)
-    log.info("Počinjem provjeru za period %s", period)
-    print(RULE, flush=True)
+def _write_check_header(period: str, label: str) -> None:
+    log.info("%s", RULE)
+    log.info("Počinjem provjeru za period %s, %s", period, label)
+    log.info("%s", RULE)
 
 
 def _check_lines(published: int, renewed_urls: list[str]) -> list[str]:

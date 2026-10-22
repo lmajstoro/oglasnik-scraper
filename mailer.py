@@ -88,7 +88,11 @@ def render_plain(listings: list[Listing], checked_at: datetime, note: str | None
                 ]
             )
         )
-    header = f"Novi oglasi · {count_label(len(ordered))}\nProvjera: {format_dt(checked_at)}"
+    header = (
+        "Novi oglasi – Index nekretnine\n"
+        f"{found_label(len(ordered))}\n"
+        f"Provjera: {format_dt(checked_at)}"
+    )
     if note:
         header = f"{header}\n{note}"
     return header + "\n\n" + "\n\n".join(blocks) + "\n"
@@ -96,13 +100,11 @@ def render_plain(listings: list[Listing], checked_at: datetime, note: str | None
 
 def render_html(listings: list[Listing], checked_at: datetime, note: str | None = None) -> str:
     ordered = _ordered(listings)
-    compact = len(ordered) > 3
-    row = _compact_row if compact else _card
-    cards = "\n".join(row(listing) for listing in ordered)
+    rows = "\n".join(_row(listing) for listing in ordered)
     note_html = ""
     if note:
         note_html = (
-            '<div style="font-family:\'Segoe UI\',Helvetica,Arial,sans-serif;font-size:14px;'
+            '<div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;'
             "line-height:1.4;color:#9a3412;padding-top:8px;\">"
             f"{html.escape(note)}</div>"
         )
@@ -113,19 +115,45 @@ def render_html(listings: list[Listing], checked_at: datetime, note: str | None 
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Novi oglasi</title>
 </head>
-<body style="margin:0;padding:0;background:#ffffff;">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#ffffff;">
+<body style="margin:0;padding:0;background:#f3f4f6;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f3f4f6;">
     <tr>
-      <td align="center" style="padding:28px 12px;">
-        <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="width:100%;max-width:560px;">
+      <td align="center" style="padding:24px 12px;">
+        <table role="presentation" width="640" cellpadding="0" cellspacing="0" style="width:100%;max-width:640px;background:#ffffff;border:1px solid #e5e7eb;border-radius:16px;">
           <tr>
-            <td style="padding:0 8px 18px;">
-              <div style="font-family:Georgia,'Times New Roman',serif;font-size:28px;line-height:1.2;color:#1c1917;">Novi oglasi</div>
-              <div style="font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:14px;line-height:1.4;color:#78716c;padding-top:6px;">{html.escape(count_label(len(ordered)))} · {html.escape(format_dt(checked_at))}</div>
+            <td bgcolor="#e30613" style="background:#e30613;padding:22px 28px;border-radius:16px 16px 0 0;">
+              <div style="font-family:Arial,Helvetica,sans-serif;font-size:22px;line-height:1.3;font-weight:700;color:#ffffff;">Novi oglasi – Index nekretnine</div>
+              <div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.4;color:#ffd5d5;padding-top:6px;">Nove objave</div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:18px 28px 6px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.4;color:#6b7280;">
+              {html.escape(found_label(len(ordered)))}
               {note_html}
             </td>
           </tr>
-          {cards}
+          <tr>
+            <td style="padding:8px 16px 12px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#9ca3af;">Naslov</td>
+                  <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#9ca3af;white-space:nowrap;">Cijena</td>
+                  <td align="right" style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#9ca3af;">Link</td>
+                </tr>
+                {rows}
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:8px 28px 18px;border-top:1px solid #f3f4f6;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#9ca3af;">Index.hr oglasi – automatski izvještaj</td>
+                  <td align="right" style="font-family:Arial,Helvetica,sans-serif;font-size:18px;font-weight:700;color:#4b5563;white-space:nowrap;">{html.escape(format_clock(checked_at))}</td>
+                </tr>
+              </table>
+            </td>
+          </tr>
         </table>
       </td>
     </tr>
@@ -135,88 +163,35 @@ def render_html(listings: list[Listing], checked_at: datetime, note: str | None 
 """
 
 
-CARD_FRAME = (
-    "background:#ffffff;border:1px solid #d6d3d1;border-radius:12px;"
-    "box-shadow:0 1px 2px rgba(28,25,23,0.08),0 8px 18px rgba(28,25,23,0.08);"
-)
-
-
-def _card(listing: Listing) -> str:
-    title, url, location, price, per_m2_html, label = _bits(listing)
-    return f"""<tr>
-            <td style="padding:0 0 16px;">
-              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="{CARD_FRAME}">
-                <tr>
-                  <td style="padding:18px 20px 8px;font-family:Georgia,'Times New Roman',serif;font-size:20px;line-height:1.3;color:#1c1917;">
-                    <a href="{url}" style="color:#1c1917;text-decoration:none;">{title}</a>
-                    <span style="font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:14px;color:#78716c;"> ({label})</span>
-                  </td>
-                </tr>
-                <tr>
-                  <td style="padding:0 20px 8px;">
-                    <span style="font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:22px;font-weight:600;color:#9a3412;">{price}</span>{per_m2_html}
-                  </td>
-                </tr>
-                <tr>
-                  <td style="padding:0 20px 16px;font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:14px;line-height:1.4;color:#44403c;">{location}</td>
-                </tr>
-                <tr>
-                  <td style="padding:0 20px 18px;">
-                    <a href="{url}" style="display:inline-block;font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:14px;font-weight:600;color:#ffffff;background:#1c1917;text-decoration:none;border-radius:8px;padding:10px 16px;">Otvori oglas</a>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>"""
-
-
-def _compact_row(listing: Listing) -> str:
-    title, url, location, price, per_m2_html, label = _bits(listing, size="13px")
-    return f"""<tr>
-            <td style="padding:0 0 8px;">
-              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="{CARD_FRAME}">
-                <tr>
-                  <td style="padding:10px 14px 2px;font-family:Georgia,'Times New Roman',serif;font-size:16px;line-height:1.3;color:#1c1917;">
-                    <a href="{url}" style="color:#1c1917;text-decoration:none;">{title}</a>
-                    <span style="font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:13px;color:#78716c;"> ({label})</span>
-                  </td>
-                </tr>
-                <tr>
-                  <td style="padding:2px 14px 0;">
-                    <span style="font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:16px;font-weight:600;color:#9a3412;">{price}</span>{per_m2_html}
-                  </td>
-                </tr>
-                <tr>
-                  <td style="padding:4px 14px 10px;">
-                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
-                      <tr>
-                        <td style="font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:13px;line-height:1.4;color:#44403c;">{location}</td>
-                        <td align="right" style="padding-left:12px;white-space:nowrap;">
-                          <a href="{url}" style="display:inline-block;font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:13px;font-weight:600;color:#ffffff;background:#1c1917;text-decoration:none;border-radius:8px;padding:6px 10px;">Otvori oglas</a>
-                        </td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>"""
-
-
-def _bits(listing: Listing, size: str = "14px") -> tuple[str, str, str, str, str, str]:
-    per_m2 = format_price(listing.price_m2)
+def _row(listing: Listing) -> str:
+    title, url, location, price, per_m2, label = _bits(listing)
     per_m2_html = ""
     if per_m2 != "—":
         per_m2_html = (
-            f'<span style="font-family:\'Segoe UI\',Helvetica,Arial,sans-serif;font-size:{size};'
-            f'color:#78716c;"> {html.escape(per_m2)}/m²</span>'
+            f'<div style="font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#9ca3af;padding-top:2px;">'
+            f"{per_m2}/m²</div>"
         )
+    return f"""<tr>
+                  <td style="padding:14px 12px;border-bottom:1px solid #f3f4f6;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.4;color:#111827;vertical-align:top;">
+                    {title}
+                    <div style="font-size:12px;color:#6b7280;padding-top:2px;">{location} ({label})</div>
+                  </td>
+                  <td style="padding:14px 12px;border-bottom:1px solid #f3f4f6;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#111827;white-space:nowrap;vertical-align:top;">
+                    {price}{per_m2_html}
+                  </td>
+                  <td align="right" style="padding:14px 12px;border-bottom:1px solid #f3f4f6;vertical-align:top;white-space:nowrap;">
+                    <a href="{url}" style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1d4ed8;text-decoration:underline;">Otvori oglas</a>
+                  </td>
+                </tr>"""
+
+
+def _bits(listing: Listing) -> tuple[str, str, str, str, str, str]:
     return (
         html.escape(listing.title),
         html.escape(listing.url, quote=True),
         html.escape(format_location(listing)),
         html.escape(format_price(listing.price)),
-        per_m2_html,
+        html.escape(format_price(listing.price_m2)),
         html.escape(seller_label(listing.legal_entity)),
     )
 
@@ -234,10 +209,18 @@ def seller_label(legal_entity: bool) -> str:
     return "Agencija" if legal_entity else "Privatni prodavač"
 
 
-def count_label(count: int) -> str:
-    if count % 10 == 1 and count % 100 != 11:
-        return f"{count} oglas"
-    return f"{count} oglasa"
+def found_label(count: int) -> str:
+    if count == 1:
+        return "Pronađen 1 novi oglas."
+    return f"Pronađeno {count} novih oglasa."
+
+
+def format_clock(value: datetime | None) -> str:
+    if value is None:
+        return "—"
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=ZAGREB)
+    return value.astimezone(ZAGREB).strftime("%H:%M")
 
 
 def format_dt(value: datetime | None) -> str:

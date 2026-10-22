@@ -4,7 +4,7 @@ Prati prodaju stanova na Index Oglasima za Zagrebačku županiju i Grad Zagreb i
 
 Pretraga je ista kao na stranici: kategorija prodaja stanova, te dvije županije, sort najnoviji. Program čita JSON koji ta stranica već koristi. Pojedinačni oglas se ne otvara. U mailu su naslov, cijena, cijena po m², lokacija, je li prodavač privatni ili agencija, i link.
 
-Obnova starog oglasa ne šalje novi mail. Kod oglasa ostaje isti. Datumi objave i obnove služe da se zna dokle čitati stranice.
+Mail ide samo za prvu objavu. Obnova ima `renewalTime`, često isti kao prepisani datum objave, i stari kod koji se vraća u pretragu. Takav oglas se zapamti bez maila. Datumi i dalje služe da se zna dokle čitati stranice.
 
 ## Lokalno pokretanje
 

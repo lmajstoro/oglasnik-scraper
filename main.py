@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from mailer import MailError, check_smtp, send_listings
-from scraper import IndexClient, ScraperError
+from mailer import ZAGREB, MailError, check_smtp, send_listings
+from scraper import IndexClient, ScraperError, is_renewal
 from store import Store
 
 ROOT = Path(__file__).resolve().parent
@@ -34,11 +34,9 @@ class Config:
 
 def main() -> None:
     _configure_output()
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        stream=sys.stdout,
-    )
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(_ZagrebFormatter("INFO: %(message)s"))
+    logging.basicConfig(level=logging.INFO, handlers=[handler])
     config = load_config()
     try:
         check_smtp(config)
@@ -65,7 +63,6 @@ def main() -> None:
                 log.info("Zadnji uspjeh ostaje. Novi pokušaj nakon intervala.")
             except Exception:
                 log.exception("Ciklus nije uspio. Novi pokušaj nakon intervala.")
-            log.info("Sljedeća provjera za %s min.", config.interval_minutes)
             time.sleep(interval)
     except KeyboardInterrupt:
         log.info("Zaustavljeno.")
@@ -118,18 +115,67 @@ def _sample_listings(client: IndexClient, count: int) -> list:
 
 def run_check(config: Config, store: Store, client: IndexClient) -> None:
     started = datetime.now(timezone.utc)
-    known = store.codes()
-    listings = client.fetch_recent(known, store.last_success())
-    fresh = [listing for listing in listings if listing.code not in known]
-    if not fresh:
+    period = _period_label(store.last_success(), started)
+    _write_check_header(period)
+    try:
+        known = store.codes()
+        listings = client.fetch_recent(known, store.last_success())
+        fresh = [listing for listing in listings if listing.code not in known]
+        renewed = [listing for listing in fresh if is_renewal(listing)]
+        published = [listing for listing in fresh if not is_renewal(listing)]
+        if published:
+            send_listings(config, published, started)
+            store.mark_sent(published, datetime.now(timezone.utc))
+        if renewed:
+            store.remember(renewed)
         store.set_last_success(started)
-        log.info("Nema novih oglasa.")
+    except (ScraperError, MailError, OSError):
+        log.info("Provjera nije uspjela. Mail nije poslan.")
         return
-    log.info("Novih oglasa: %s. Šaljem mail.", len(fresh))
-    send_listings(config, fresh, started)
-    store.mark_sent(fresh, datetime.now(timezone.utc))
-    store.set_last_success(started)
-    log.info("Mail je poslan za %s oglasa.", len(fresh))
+    except Exception:
+        log.info("Provjera nije uspjela. Mail nije poslan.")
+        log.exception("Provjera nije uspjela.")
+        return
+    for line in _check_lines(len(published), [item.url for item in renewed]):
+        log.info("%s", line)
+
+
+RULE = "-----------------------------------------------------------"
+
+
+def _write_check_header(period: str) -> None:
+    print(RULE, flush=True)
+    log.info("Počinjem provjeru za period %s", period)
+    print(RULE, flush=True)
+
+
+def _check_lines(published: int, renewed_urls: list[str]) -> list[str]:
+    if published == 0:
+        lines = ["Nema novih oglasa."]
+    else:
+        lines = [f"Novih oglasa: {published}. Mail je poslan."]
+    if not renewed_urls:
+        return lines
+    count = len(renewed_urls)
+    if count == 1:
+        lines.append("Pronađen 1, nije poslan jer je ponovno objavljen:")
+    else:
+        lines.append(f"Pronađeno {count}, nisu poslani jer su ponovno objavljeni:")
+    lines.extend(renewed_urls)
+    return lines
+
+
+def _period_label(previous: datetime | None, started: datetime) -> str:
+    end = _hhmm(started)
+    if previous is None:
+        return f"{end} - {end}"
+    return f"{_hhmm(previous)} - {end}"
+
+
+def _hhmm(moment: datetime) -> str:
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(ZAGREB).strftime("%H:%M")
 
 
 def load_config() -> Config:
@@ -202,6 +248,14 @@ def _resolve(path: str) -> str:
     if not candidate.is_absolute():
         candidate = ROOT / candidate
     return str(candidate)
+
+
+class _ZagrebFormatter(logging.Formatter):
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        moment = datetime.fromtimestamp(record.created, ZAGREB)
+        if datefmt:
+            return moment.strftime(datefmt)
+        return moment.strftime("%Y-%m-%d %H:%M:%S") + f",{int(record.msecs):03d}"
 
 
 def _configure_output() -> None:

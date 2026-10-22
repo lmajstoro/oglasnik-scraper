@@ -113,6 +113,15 @@ class Listing:
         )
 
 
+def is_renewal(listing: Listing) -> bool:
+    """Obnova postavi renewalTime. Prva objava ga nema.
+
+    Index tada često prepiše i postedTime na isti trenutak i vrati stari kod
+    u pretragu. Sam kod zato nije dovoljan da se obnova razlikuje od nove objave.
+    """
+    return listing.renewed_at is not None
+
+
 def should_stop(items: list[Listing], known: set[int], last_success: datetime | None) -> bool:
     """Stani na običnoj stranici koja je cijela već poslana i starija od zadnjeg ciklusa.
 
@@ -169,7 +178,7 @@ class IndexClient:
                 break
             for item in items:
                 found.setdefault(item.code, item)
-            log.info(
+            log.debug(
                 "Stranica %s: %s oglasa (ukupno pročitano %s%s)",
                 page,
                 len(items),
@@ -177,7 +186,7 @@ class IndexClient:
                 f" od {total_hint}" if total_hint else "",
             )
             if not full and page >= MIN_PAGES and should_stop(items, known, last_success):
-                log.info("Stranica %s je starija od zadnje provjere, čitanje staje.", page)
+                log.debug("Stranica %s je starija od zadnje provjere, čitanje staje.", page)
                 break
             if next_page is None:
                 break

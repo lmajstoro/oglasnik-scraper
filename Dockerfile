@@ -12,6 +12,7 @@ RUN useradd --system --create-home --uid 10001 oglasnik \
     && chown oglasnik:oglasnik /data
 
 USER oglasnik
+ENV TZ=Europe/Zagreb
 ENV DATABASE_PATH=/data/seen.sqlite
 VOLUME /data
 

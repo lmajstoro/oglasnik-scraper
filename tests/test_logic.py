@@ -1,3 +1,4 @@
+import logging
 import sys
 import tempfile
 import unittest
@@ -7,7 +8,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mailer import format_dt, format_price, render_html, render_plain
-from scraper import Listing, _next_page, parse_time, should_stop
+from main import _ZagrebFormatter, _check_lines, _period_label
+from scraper import Listing, _next_page, is_renewal, parse_time, should_stop
 from store import Store
 
 
@@ -63,6 +65,22 @@ class StopTests(unittest.TestCase):
         item = listing(code=1, posted_at=moment)
         self.assertFalse(should_stop([item], {1}, moment))
 
+    def test_renewal_is_not_a_new_listing(self):
+        published = listing(code=7646760, renewed_at=None)
+        bumped = listing(
+            code=7462995,
+            posted_at=datetime(2026, 10, 22, 9, 47, tzinfo=timezone.utc),
+            renewed_at=datetime(2026, 10, 22, 9, 47, tzinfo=timezone.utc),
+        )
+        older = listing(
+            code=7357884,
+            posted_at=datetime(2026, 5, 4, tzinfo=timezone.utc),
+            renewed_at=datetime(2026, 10, 19, tzinfo=timezone.utc),
+        )
+        self.assertFalse(is_renewal(published))
+        self.assertTrue(is_renewal(bumped))
+        self.assertTrue(is_renewal(older))
+
     def test_empty_page_stops(self):
         self.assertTrue(should_stop([], set(), datetime.now(timezone.utc)))
 
@@ -76,6 +94,41 @@ class FormatTests(unittest.TestCase):
         moment = datetime(2026, 10, 16, 11, 11, tzinfo=timezone.utc)
         self.assertEqual(format_dt(moment), "16.10.2026. 13:11")
         self.assertEqual(format_dt(None), "—")
+
+    def test_log_time_is_zagreb(self):
+        record = logging.LogRecord("oglasnik", logging.INFO, __file__, 1, "poruka", (), None)
+        record.created = datetime(2026, 10, 22, 10, 1, 45, tzinfo=timezone.utc).timestamp()
+        record.msecs = 45
+        formatted = _ZagrebFormatter("%(asctime)s %(message)s").format(record)
+        self.assertTrue(formatted.startswith("2026-10-22 12:01:45,045 "))
+
+    def test_check_report_permutations(self):
+        link = "https://www.index.hr/oglasi/nekretnine/prodaja-stanova/oglas/stan/7462995"
+        other = "https://www.index.hr/oglasi/nekretnine/prodaja-stanova/oglas/stan/7462940"
+        self.assertEqual(_check_lines(0, []), ["Nema novih oglasa."])
+        self.assertEqual(
+            _check_lines(0, [link, other]),
+            [
+                "Nema novih oglasa.",
+                "Pronađeno 2, nisu poslani jer su ponovno objavljeni:",
+                link,
+                other,
+            ],
+        )
+        self.assertEqual(_check_lines(1, []), ["Novih oglasa: 1. Mail je poslan."])
+        self.assertEqual(
+            _check_lines(3, [link]),
+            [
+                "Novih oglasa: 3. Mail je poslan.",
+                "Pronađen 1, nije poslan jer je ponovno objavljen:",
+                link,
+            ],
+        )
+
+    def test_period_is_zagreb_clock(self):
+        previous = datetime(2026, 10, 22, 11, 13, tzinfo=timezone.utc)
+        started = datetime(2026, 10, 22, 11, 18, tzinfo=timezone.utc)
+        self.assertEqual(_period_label(previous, started), "13:13 - 13:18")
 
     def test_price(self):
         self.assertEqual(format_price(355000), "355.000 €")
@@ -94,9 +147,11 @@ class FormatTests(unittest.TestCase):
             self.assertIn("(Agencija)", body)
             self.assertIn(item.url, body)
         self.assertIn("Otvori oglas", html_body)
-        self.assertIn("border:1px solid #d6d3d1", html_body)
+        self.assertIn("Novi oglasi – Index nekretnine", html_body)
+        self.assertIn("Naslov", html_body)
+        self.assertIn("#e30613", html_body)
         self.assertNotIn("#f4f0e8", html_body)
-        self.assertNotIn("Objavljen", html_body)
+        self.assertNotIn(">Objavljen", html_body)
         self.assertNotIn("testni oglas", html_body.lower())
 
     def test_test_note_is_included_when_requested(self):
@@ -106,14 +161,13 @@ class FormatTests(unittest.TestCase):
         self.assertIn(note, render_html([item], checked, note))
         self.assertIn(note, render_plain([item], checked, note))
 
-    def test_more_than_three_uses_compact_rows(self):
+    def test_any_count_uses_the_same_table(self):
         items = [listing(code=index, title=f"Stan {index}") for index in range(1, 5)]
         checked = datetime(2026, 10, 22, 7, 15, tzinfo=timezone.utc)
-        compact = render_html(items, checked)
-        cards = render_html(items[:3], checked)
-        self.assertIn("padding:10px 14px 2px", compact)
-        self.assertIn("padding:18px 20px 8px", cards)
-        self.assertNotIn("padding:10px 14px 2px", cards)
+        body = render_html(items, checked)
+        self.assertIn("Pronađeno 4 novih oglasa.", body)
+        self.assertEqual(body.count("Otvori oglas"), 4)
+        self.assertIn("09:15", body)
 
 
 class ParseTests(unittest.TestCase):
@@ -167,6 +221,16 @@ class StoreTests(unittest.TestCase):
             self.assertFalse(store.test_sent())
             store.mark_test_sent()
             self.assertTrue(store.test_sent())
+            renewed = listing(
+                code=7462995,
+                posted_at=datetime(2026, 10, 22, 9, 47, tzinfo=timezone.utc),
+                renewed_at=datetime(2026, 10, 22, 9, 47, tzinfo=timezone.utc),
+            )
+            self.assertEqual(store.remember([renewed, old]), 1)
+            remembered = store.conn.execute(
+                "SELECT sent_at FROM seen WHERE code = 7462995"
+            ).fetchone()
+            self.assertIsNone(remembered["sent_at"])
             store.close()
 
 

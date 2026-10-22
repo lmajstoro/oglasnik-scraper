@@ -44,9 +44,9 @@ class Store:
         row = self.conn.execute("SELECT COUNT(*) AS n FROM seen").fetchone()
         return int(row["n"])
 
-    def save_baseline(self, listings: list[Listing]) -> int:
+    def remember(self, listings: list[Listing]) -> int:
         if not listings:
-            raise ValueError("Baseline nema oglasa.")
+            return 0
         before = self.count()
         with self.conn:
             self.conn.executemany(
@@ -57,11 +57,18 @@ class Store:
                 """,
                 [_row(listing, sent_at=None) for listing in listings],
             )
+        return self.count() - before
+
+    def save_baseline(self, listings: list[Listing]) -> int:
+        if not listings:
+            raise ValueError("Baseline nema oglasa.")
+        added = self.remember(listings)
+        with self.conn:
             self.conn.execute(
                 "INSERT INTO meta (key, value) VALUES ('baseline_complete', '1') "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
             )
-        return self.count() - before
+        return added
 
     def mark_sent(self, listings: list[Listing], sent_at: datetime) -> None:
         if not listings:

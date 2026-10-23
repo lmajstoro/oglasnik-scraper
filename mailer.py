@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import html
 import smtplib
-from datetime import datetime
+from datetime import datetime, timezone
 from email.message import EmailMessage
 from zoneinfo import ZoneInfo
 
@@ -30,12 +30,20 @@ def send_listings(
     *,
     test: bool = False,
     source: str = "index",
+    period_start: datetime | None = None,
+    period_end: datetime | None = None,
 ) -> None:
     if not listings:
         return
     count = len(listings)
     note = test_note(count) if test else None
-    subject = _subject(count, test=test, source=source)
+    subject = report_subject(
+        count,
+        source=source,
+        period_start=period_start or checked_at,
+        period_end=period_end or checked_at,
+        test=test,
+    )
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = config.mail_from
@@ -171,18 +179,34 @@ def render_html(
 """
 
 
-def _subject(count: int, *, test: bool, source: str) -> str:
-    if source == "plavi":
-        if test and count == 1:
-            return "Test: novi oglas, Plavi oglasnik"
-        if test:
-            return f"Test: novi oglasi, Plavi oglasnik ({count})"
-        return f"Novi oglasi, Plavi oglasnik ({count})"
-    if test and count == 1:
-        return "Test: novi oglas za stanove"
+def report_subject(
+    count: int,
+    *,
+    source: str,
+    period_start: datetime,
+    period_end: datetime,
+    test: bool = False,
+) -> str:
+    name = "Plavi oglasnik" if source == "plavi" else "Index"
+    unit = "komad" if count % 10 == 1 and count % 100 != 11 else "komada"
+    subject = f"Novi Oglasi {name} ({count} {unit}) - {_report_span(period_start, period_end)}"
     if test:
-        return f"Test: novi oglasi za stanove ({count})"
-    return f"Novi oglasi za stanove ({count})"
+        return f"Test: {subject}"
+    return subject
+
+
+def _report_span(period_start: datetime, period_end: datetime) -> str:
+    start = _as_zagreb(period_start)
+    end = _as_zagreb(period_end)
+    if start.date() == end.date():
+        return f"{start:%d.%m.%Y} {start:%H:%M} - {end:%H:%M}"
+    return f"{start:%d.%m.%Y} {start:%H:%M} - {end:%d.%m.%Y} {end:%H:%M}"
+
+
+def _as_zagreb(moment: datetime) -> datetime:
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(ZAGREB)
 
 
 def _theme(source: str) -> dict[str, str]:

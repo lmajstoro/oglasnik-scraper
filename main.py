@@ -119,7 +119,16 @@ def send_test(config: Config, watch: Watch) -> None:
     if len(samples) < count:
         log.info("%s: za test je dostupno %s oglasa, ne %s.", watch.label, len(samples), count)
     log.info("%s: šaljem testni mail s %s oglasa.", watch.label, len(samples))
-    send_listings(config, samples, datetime.now(timezone.utc), test=True, source=watch.source)
+    checked = datetime.now(timezone.utc)
+    send_listings(
+        config,
+        samples,
+        checked,
+        test=True,
+        source=watch.source,
+        period_start=checked,
+        period_end=checked,
+    )
     watch.store.mark_test_sent()
     log.info("%s: testni mail je poslan. Ti oglasi se neće ponoviti.", watch.label)
 
@@ -143,15 +152,23 @@ def _sample_listings(client: IndexClient | PlaviClient, count: int) -> list:
 
 def run_check(config: Config, watch: Watch) -> None:
     started = datetime.now(timezone.utc)
-    period = _period_label(watch.store.last_success(), started)
+    previous = watch.store.last_success()
+    period = _period_label(previous, started)
     _write_check_header(period, watch.label)
     try:
         known = watch.store.codes()
-        listings = watch.client.fetch_recent(known, watch.store.last_success())
+        listings = watch.client.fetch_recent(known, previous)
         fresh = [listing for listing in listings if listing.code not in known]
         published, renewed = _split(watch, fresh)
         if published:
-            send_listings(config, published, started, source=watch.source)
+            send_listings(
+                config,
+                published,
+                started,
+                source=watch.source,
+                period_start=previous or started,
+                period_end=started,
+            )
             watch.store.mark_sent(published, datetime.now(timezone.utc))
         if renewed:
             watch.store.remember(renewed)

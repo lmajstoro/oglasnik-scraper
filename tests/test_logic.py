@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from mailer import format_dt, format_price, render_html, render_plain
+from mailer import format_dt, format_price, render_html, render_plain, report_subject
 from main import _ZagrebFormatter, _check_lines, _period_label, in_night_pause, next_check_at
 from plavi import classify_plavi, extract_ads, listing_from_ad
 from scraper import Listing, _next_page, is_renewal, parse_time, should_stop
@@ -215,6 +215,42 @@ class ScheduleTests(unittest.TestCase):
 
 def _zagreb(year: int, month: int, day: int, hour: int, minute: int, second: int = 0) -> datetime:
     return datetime(year, month, day, hour, minute, second, tzinfo=ZoneInfo("Europe/Zagreb"))
+
+
+class SubjectTests(unittest.TestCase):
+    def test_index_and_plavi_share_the_same_shape(self):
+        start = _zagreb(2026, 10, 23, 21, 10)
+        end = _zagreb(2026, 10, 23, 21, 15)
+        self.assertEqual(
+            report_subject(3, source="index", period_start=start, period_end=end),
+            "Novi Oglasi Index (3 komada) - 23.10.2026 21:10 - 21:15",
+        )
+        self.assertEqual(
+            report_subject(1, source="plavi", period_start=start, period_end=end),
+            "Novi Oglasi Plavi oglasnik (1 komad) - 23.10.2026 21:10 - 21:15",
+        )
+
+    def test_count_uses_croatian_plural(self):
+        start = end = _zagreb(2026, 10, 23, 8, 0)
+        self.assertIn("(1 komad)", report_subject(1, source="index", period_start=start, period_end=end))
+        self.assertIn("(11 komada)", report_subject(11, source="index", period_start=start, period_end=end))
+        self.assertIn("(21 komad)", report_subject(21, source="index", period_start=start, period_end=end))
+        self.assertIn("(4 komada)", report_subject(4, source="plavi", period_start=start, period_end=end))
+
+    def test_midnight_period_shows_both_dates(self):
+        start = _zagreb(2026, 10, 23, 23, 55)
+        end = _zagreb(2026, 10, 24, 0, 0)
+        self.assertEqual(
+            report_subject(2, source="index", period_start=start, period_end=end),
+            "Novi Oglasi Index (2 komada) - 23.10.2026 23:55 - 24.10.2026 00:00",
+        )
+
+    def test_mail_keeps_the_same_subject_shape_when_marked_as_test(self):
+        moment = _zagreb(2026, 10, 23, 21, 25)
+        self.assertEqual(
+            report_subject(1, source="plavi", period_start=moment, period_end=moment, test=True),
+            "Test: Novi Oglasi Plavi oglasnik (1 komad) - 23.10.2026 21:25 - 21:25",
+        )
 
 
 class ParseTests(unittest.TestCase):

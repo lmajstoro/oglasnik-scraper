@@ -7,7 +7,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, time as clock, timedelta, timezone
 from pathlib import Path
 
 from mailer import ZAGREB, MailError, check_smtp, send_listings
@@ -17,6 +17,9 @@ from store import PLAVI, INDEX, Store
 
 ROOT = Path(__file__).resolve().parent
 log = logging.getLogger("oglasnik")
+# Zadnja provjera u ponoć, prva sljedeća u 8 ujutro. Između nema provjera.
+_QUIET_AFTER = clock(0, 0)
+_DAY_START = clock(8, 0)
 
 
 @dataclass(frozen=True)
@@ -57,13 +60,15 @@ def main() -> None:
         Watch(INDEX, "Index", Store(path, INDEX), IndexClient(config.page_delay_seconds)),
         Watch(PLAVI, "Plavi oglasnik", Store(path, PLAVI), PlaviClient(config.page_delay_seconds)),
     ]
-    interval = config.interval_minutes * 60
+    interval = timedelta(minutes=config.interval_minutes)
     log.info("Interval provjere je %s min.", config.interval_minutes)
+    log.info("Nema provjera od 00:00 do 08:00.")
     try:
         while True:
+            _wait_out_quiet_hours()
             for watch in watches:
                 _run_watch(config, watch)
-            time.sleep(interval)
+            _wait_for_next_check(interval)
     except KeyboardInterrupt:
         log.info("Zaustavljeno.")
     finally:
@@ -206,6 +211,57 @@ def _hhmm(moment: datetime) -> str:
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
     return moment.astimezone(ZAGREB).strftime("%H:%M")
+
+
+def in_night_pause(moment: datetime) -> bool:
+    current = _as_zagreb(moment).time()
+    return _QUIET_AFTER < current < _DAY_START
+
+
+def next_check_at(after: datetime, interval: timedelta) -> datetime:
+    """Sljedeći početak provjere. Ponoć ostaje zadnji termin, pa pauza do 08:00."""
+    local = _as_zagreb(after)
+    if in_night_pause(local):
+        return _at_clock(local, _DAY_START)
+    candidate = local + interval
+    if not in_night_pause(candidate):
+        return candidate
+    midnight = _at_clock(candidate, _QUIET_AFTER)
+    if local < midnight:
+        return midnight
+    return _at_clock(candidate, _DAY_START)
+
+
+def _wait_out_quiet_hours() -> None:
+    now = datetime.now(timezone.utc)
+    if not in_night_pause(now):
+        return
+    wake = next_check_at(now, timedelta(0))
+    log.info("Noćna pauza. Sljedeća provjera u 08:00.")
+    _sleep_until(wake)
+
+
+def _wait_for_next_check(interval: timedelta) -> None:
+    wake = next_check_at(datetime.now(timezone.utc), interval)
+    if _as_zagreb(wake).time() == _DAY_START:
+        log.info("Noćna pauza. Sljedeća provjera u 08:00.")
+    _sleep_until(wake)
+
+
+def _sleep_until(target: datetime) -> None:
+    delay = (target - datetime.now(timezone.utc)).total_seconds()
+    if delay > 0:
+        time.sleep(delay)
+
+
+def _as_zagreb(moment: datetime) -> datetime:
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(ZAGREB)
+
+
+def _at_clock(local: datetime, mark: clock) -> datetime:
+    return local.replace(hour=mark.hour, minute=mark.minute, second=0, microsecond=0)
 
 
 def load_config() -> Config:

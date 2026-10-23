@@ -5,11 +5,12 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mailer import format_dt, format_price, render_html, render_plain
-from main import _ZagrebFormatter, _check_lines, _period_label
+from main import _ZagrebFormatter, _check_lines, _period_label, in_night_pause, next_check_at
 from plavi import classify_plavi, extract_ads, listing_from_ad
 from scraper import Listing, _next_page, is_renewal, parse_time, should_stop
 from store import Store
@@ -180,6 +181,40 @@ class FormatTests(unittest.TestCase):
         self.assertIn("oglasnik.hr – automatski izvještaj", body)
         self.assertNotIn("#e30613", body)
         self.assertIn("Novi oglasi – Plavi oglasnik", plain)
+
+
+class ScheduleTests(unittest.TestCase):
+    def test_daytime_keeps_the_interval(self):
+        after = _zagreb(2026, 10, 23, 21, 0)
+        self.assertEqual(next_check_at(after, timedelta(minutes=5)), _zagreb(2026, 10, 23, 21, 5))
+
+    def test_midnight_stays_the_last_check(self):
+        after = _zagreb(2026, 10, 23, 23, 55)
+        self.assertEqual(next_check_at(after, timedelta(minutes=5)), _zagreb(2026, 10, 24, 0, 0))
+        self.assertFalse(in_night_pause(_zagreb(2026, 10, 24, 0, 0)))
+
+    def test_interval_that_would_cross_midnight_stops_at_midnight(self):
+        after = _zagreb(2026, 10, 23, 23, 57)
+        self.assertEqual(next_check_at(after, timedelta(minutes=5)), _zagreb(2026, 10, 24, 0, 0))
+
+    def test_after_midnight_the_next_check_is_eight(self):
+        after = _zagreb(2026, 10, 24, 0, 0)
+        self.assertEqual(next_check_at(after, timedelta(minutes=5)), _zagreb(2026, 10, 24, 8, 0))
+
+    def test_night_hours_wait_until_morning(self):
+        moment = _zagreb(2026, 10, 24, 2, 30)
+        self.assertTrue(in_night_pause(moment))
+        self.assertEqual(next_check_at(moment, timedelta(minutes=5)), _zagreb(2026, 10, 24, 8, 0))
+        self.assertTrue(in_night_pause(_zagreb(2026, 10, 24, 7, 59, 59)))
+        self.assertFalse(in_night_pause(_zagreb(2026, 10, 24, 8, 0)))
+
+    def test_dst_fallback_still_resumes_at_eight_local(self):
+        after = _zagreb(2026, 10, 25, 0, 10)
+        self.assertEqual(next_check_at(after, timedelta(minutes=5)), _zagreb(2026, 10, 25, 8, 0))
+
+
+def _zagreb(year: int, month: int, day: int, hour: int, minute: int, second: int = 0) -> datetime:
+    return datetime(year, month, day, hour, minute, second, tzinfo=ZoneInfo("Europe/Zagreb"))
 
 
 class ParseTests(unittest.TestCase):

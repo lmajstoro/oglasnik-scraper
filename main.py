@@ -64,6 +64,7 @@ def main() -> None:
     interval = timedelta(minutes=config.interval_minutes)
     log.info("Interval provjere je %s min.", config.interval_minutes)
     log.info("Nema provjera od 00:00 do 08:00.")
+    log.info("Agencijski oglasi se ne šalju.")
     try:
         while True:
             _wait_out_quiet_hours()
@@ -141,7 +142,7 @@ def _sample_listings(client: IndexClient | PlaviClient, count: int) -> list:
     while len(found) < count and page is not None:
         items, next_page, _ = client.fetch_page(page)
         for item in items:
-            if item.code in seen:
+            if item.code in seen or item.legal_entity:
                 continue
             seen.add(item.code)
             found.append(item)
@@ -161,18 +162,18 @@ def run_check(config: Config, watch: Watch) -> None:
         listings = watch.client.fetch_recent(known, previous)
         fresh = [listing for listing in listings if listing.code not in known]
         published, renewed = _split(watch, fresh)
-        if published:
+        private, agencies = _without_agencies(published)
+        if private:
             send_listings(
                 config,
-                published,
+                private,
                 started,
                 source=watch.source,
                 period_start=previous or started,
                 period_end=started,
             )
-            watch.store.mark_sent(published, datetime.now(timezone.utc))
-        if renewed:
-            watch.store.remember(renewed)
+            watch.store.mark_sent(private, datetime.now(timezone.utc))
+        watch.store.remember([*renewed, *agencies])
         watch.store.set_last_success(started)
     except (ScraperError, MailError, OSError):
         log.info("Provjera nije uspjela. Mail nije poslan.")
@@ -181,8 +182,14 @@ def run_check(config: Config, watch: Watch) -> None:
         log.info("Provjera nije uspjela. Mail nije poslan.")
         log.exception("Provjera nije uspjela.")
         return
-    for line in _check_lines(len(published), [item.url for item in renewed]):
+    for line in _check_lines(len(private), [item.url for item in renewed]):
         log.info("%s", line)
+
+
+def _without_agencies(listings: list) -> tuple[list, list]:
+    private = [item for item in listings if not item.legal_entity]
+    agencies = [item for item in listings if item.legal_entity]
+    return private, agencies
 
 
 def _split(watch: Watch, fresh: list) -> tuple[list, list]:

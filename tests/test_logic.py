@@ -10,7 +10,14 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mailer import format_dt, format_price, render_html, render_plain, report_subject
-from main import _ZagrebFormatter, _check_lines, _period_label, in_night_pause, next_check_at
+from main import (
+    _ZagrebFormatter,
+    _check_lines,
+    _period_label,
+    _without_agencies,
+    in_night_pause,
+    next_check_at,
+)
 from plavi import classify_plavi, extract_ads, listing_from_ad
 from scraper import Listing, _next_page, is_renewal, parse_time, should_stop
 from store import Store
@@ -195,6 +202,15 @@ class FormatTests(unittest.TestCase):
         self.assertIn("oglasnik.hr – automatski izvještaj", body)
         self.assertNotIn("#e30613", body)
         self.assertIn("Novi oglasi – Plavi oglasnik", plain)
+
+
+class AgencyFilterTests(unittest.TestCase):
+    def test_agencies_are_kept_out_of_the_mail_for_both_sources(self):
+        private = listing(code=1, title="Privatni", legal_entity=False)
+        agency = listing(code=2, title="Agencija", legal_entity=True)
+        kept, skipped = _without_agencies([agency, private])
+        self.assertEqual([item.title for item in kept], ["Privatni"])
+        self.assertEqual([item.title for item in skipped], ["Agencija"])
 
 
 class ScheduleTests(unittest.TestCase):

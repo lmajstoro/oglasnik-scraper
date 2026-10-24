@@ -54,6 +54,7 @@ def main() -> None:
         check_smtp(config)
     except MailError as exc:
         raise SystemExit(str(exc)) from exc
+    log.info("Verzija je %s.", os.environ.get("APP_VERSION", "dev"))
     log.info("SMTP prijava uspjela. Mail ide na %s.", config.mail_to)
     path = config.database_path
     watches = [

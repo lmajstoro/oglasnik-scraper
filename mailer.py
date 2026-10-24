@@ -261,7 +261,7 @@ def _bits(listing: Listing) -> tuple[str, str, str, str, str, str]:
 
 
 def _ordered(listings: list[Listing]) -> list[Listing]:
-    return sorted(listings, key=lambda item: (item.activity, item.code), reverse=True)
+    return sorted(listings, key=lambda item: (item.price_m2 is None, item.price_m2 or 0, item.code))
 
 
 def format_location(listing: Listing) -> str:

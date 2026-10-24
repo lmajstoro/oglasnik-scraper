@@ -172,6 +172,20 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(body.count("Otvori oglas"), 4)
         self.assertIn("09:15", body)
 
+    def test_mail_sorts_by_price_per_square_meter(self):
+        checked = datetime(2026, 10, 24, 6, 0, tzinfo=timezone.utc)
+        cheap = listing(code=3, title="Jeftini", price_m2=1800)
+        mid = listing(code=1, title="Srednji", price_m2=3200)
+        dear = listing(code=2, title="Skupi", price_m2=5100)
+        unknown = listing(code=4, title="Bez kvadrata", price_m2=None)
+        for source in ("index", "plavi"):
+            html_body = render_html([dear, unknown, cheap, mid], checked, source=source)
+            plain = render_plain([dear, unknown, cheap, mid], checked, source=source)
+            for body in (html_body, plain):
+                self.assertLess(body.index("Jeftini"), body.index("Srednji"))
+                self.assertLess(body.index("Srednji"), body.index("Skupi"))
+                self.assertLess(body.index("Skupi"), body.index("Bez kvadrata"))
+
     def test_plavi_mail_uses_blue_theme(self):
         checked = datetime(2026, 10, 22, 7, 15, tzinfo=timezone.utc)
         body = render_html([listing()], checked, source="plavi")

@@ -9,10 +9,11 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from mailer import format_dt, format_price, render_html, render_plain, report_subject
+from mailer import Offer, format_dt, format_price, render_html, render_plain, report_subject
 from main import (
     _ZagrebFormatter,
     _check_lines,
+    _lower_prices,
     _period_label,
     _without_agencies,
     in_night_pause,
@@ -158,6 +159,24 @@ class FormatTests(unittest.TestCase):
                 "Nema novih oglasa.",
                 "Pronađeno 2, nisu poslani jer su agencijski:",
                 link,
+                other,
+            ],
+        )
+        self.assertEqual(
+            _check_lines(0, [], [], 1),
+            [
+                "Nema novih oglasa.",
+                "Obnovljen s nižom cijenom: 1. Mail je poslan.",
+            ],
+        )
+        self.assertEqual(
+            _check_lines(2, [link], [other], 2),
+            [
+                "Novih oglasa: 2. Mail je poslan.",
+                "Obnovljenih s nižom cijenom: 2. Mail je poslan.",
+                "Pronađen 1, nije poslan jer je ponovno objavljen:",
+                link,
+                "Pronađen 1, nije poslan jer je agencijski:",
                 other,
             ],
         )
@@ -309,6 +328,43 @@ class SubjectTests(unittest.TestCase):
             "Test: Novi Oglasi Plavi oglasnik (1 komad) - 23.10.2026 21:25 - 21:25",
         )
 
+    def test_lower_price_mail_strikes_the_old_price(self):
+        checked = datetime(2026, 10, 25, 7, 0, tzinfo=timezone.utc)
+        offer = Offer(listing(price=159000, price_m2=2650), 180000, 3000)
+        body = render_html([offer], checked)
+        plain = render_plain([offer], checked)
+        self.assertIn("Obnovljeni oglasi – Index nekretnine", body)
+        self.assertIn("Niža cijena", body)
+        self.assertIn("Obnova, niža cijena", body)
+        self.assertIn("line-through", body)
+        self.assertIn("180.000 €", body)
+        self.assertIn("159.000 €", body)
+        self.assertIn("3.000 €", body)
+        self.assertIn("2.650 €", body)
+        self.assertIn("Pronađen 1 obnovljen oglas s nižom cijenom.", body)
+        self.assertIn("180.000 € → 159.000 €", plain)
+        self.assertIn("Obnova, niža cijena", plain)
+
+    def test_mixed_mail_uses_one_summary(self):
+        checked = datetime(2026, 10, 25, 7, 0, tzinfo=timezone.utc)
+        fresh = listing(code=1, price=200000, price_m2=4000)
+        renewed = Offer(listing(code=2, price=159000, price_m2=2650), 180000, 3000)
+        body = render_html([fresh, renewed], checked, source="plavi")
+        self.assertIn("Oglasi – Plavi oglasnik", body)
+        self.assertIn("Nove objave i niže cijene", body)
+        self.assertIn("Pronađen 1 novi oglas i 1 obnovljen s nižom cijenom.", body)
+        self.assertIn("#0E6EB8", body)
+        self.assertNotIn("#e30613", body)
+        start = end = _zagreb(2026, 10, 25, 8, 0)
+        self.assertEqual(
+            report_subject(2, source="plavi", period_start=start, period_end=end, reduced=1),
+            "Novi i obnovljeni Plavi oglasnik (2 komada) - 25.10.2026 08:00 - 08:00",
+        )
+        self.assertEqual(
+            report_subject(1, source="index", period_start=start, period_end=end, reduced=1),
+            "Obnovljeni oglasi, niža cijena Index (1 komad) - 25.10.2026 08:00 - 08:00",
+        )
+
 
 class ParseTests(unittest.TestCase):
     def test_api_payload(self):
@@ -416,8 +472,38 @@ class StoreTests(unittest.TestCase):
             )
             self.assertEqual([item.code for item in published], [9])
             self.assertEqual([item.code for item in renewed], [4])
+            columns = [row[1] for row in index.conn.execute("PRAGMA table_info(seen)")]
+            self.assertIn("price_history", columns)
             index.close()
             plavi.close()
+
+    def test_price_history_keeps_only_changes_and_ignores_unknown_codes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / "seen.sqlite")
+            store = Store(path, "index")
+            when = datetime(2026, 10, 25, 6, 0, tzinfo=timezone.utc)
+            current = listing(code=5, price=180000, price_m2=3000)
+            store.remember([current])
+            self.assertEqual(store.backfill_prices([current, listing(code=9, price=1)], when), 1)
+            self.assertEqual(store.codes(), {5})
+            self.assertEqual(store.quote(5), (180000, 3000))
+            self.assertEqual(store.record_price(current, when), "same")
+            cheaper = listing(code=5, price=159000, price_m2=2650)
+            agency = listing(code=6, price=100, price_m2=10, legal_entity=True)
+            store.remember([agency])
+            store.record_price(listing(code=6, price=200, price_m2=20, legal_entity=True), when)
+            found = _lower_prices(store, [cheaper, agency, cheaper])
+            self.assertEqual([item.listing.code for item in found], [5])
+            self.assertEqual(found[0].previous_price, 180000)
+            self.assertEqual(found[0].previous_price_m2, 3000)
+            self.assertEqual(store.record_price(cheaper, when), "lower")
+            self.assertEqual(store.record_price(cheaper, when), "same")
+            history = store._history(5)
+            self.assertEqual([point["price"] for point in history], [180000, 159000])
+            self.assertIsNone(store.price_sweep_version())
+            store.mark_price_sweep("abc")
+            self.assertEqual(store.price_sweep_version(), "abc")
+            store.close()
 
 
 class PlaviParseTests(unittest.TestCase):

@@ -10,9 +10,9 @@ from dataclasses import dataclass
 from datetime import datetime, time as clock, timedelta, timezone
 from pathlib import Path
 
-from mailer import ZAGREB, MailError, check_smtp, send_listings
+from mailer import ZAGREB, MailError, Offer, check_smtp, send_listings
 from plavi import PlaviClient, classify_plavi
-from scraper import IndexClient, ScraperError, is_renewal
+from scraper import IndexClient, Listing, ScraperError, is_renewal
 from store import PLAVI, INDEX, Store
 
 ROOT = Path(__file__).resolve().parent
@@ -82,6 +82,8 @@ def _run_watch(config: Config, watch: Watch) -> None:
     try:
         if not watch.store.baseline_complete():
             run_baseline(watch)
+        if watch.store.price_sweep_version() != _app_version():
+            run_price_sweep(watch)
         if not watch.store.test_sent():
             send_test(config, watch)
         else:
@@ -100,6 +102,8 @@ def run_baseline(watch: Watch) -> None:
     log.info("%s: prvi prolaz sprema postojeće oglase. Mail se ne šalje.", watch.label)
     listings = watch.client.fetch_all()
     added = watch.store.save_baseline(listings)
+    watch.store.backfill_prices(listings, started)
+    watch.store.mark_price_sweep(_app_version())
     watch.store.set_last_success(started)
     log.info(
         "%s: baseline spremljen, %s zapisa, %s ukupno.",
@@ -107,6 +111,17 @@ def run_baseline(watch: Watch) -> None:
         added,
         watch.store.count(),
     )
+
+
+def run_price_sweep(watch: Watch) -> None:
+    version = _app_version()
+    log.info("%s: prolaz cijena za verziju %s. Mail se ne šalje.", watch.label, version)
+    listings = watch.client.fetch_all()
+    if not listings:
+        raise ScraperError(f"{watch.label}: prolaz cijena nije dobio nijedan oglas.")
+    written = watch.store.backfill_prices(listings, datetime.now(timezone.utc))
+    watch.store.mark_price_sweep(version)
+    log.info("%s: cijene spremljene za %s oglasa.", watch.label, written)
 
 
 def send_test(config: Config, watch: Watch) -> None:
@@ -161,33 +176,75 @@ def run_check(config: Config, watch: Watch) -> None:
         known = watch.store.codes()
         listings = watch.client.fetch_recent(known, previous)
         fresh = [listing for listing in listings if listing.code not in known]
+        known_now = [listing for listing in listings if listing.code in known]
         published, renewed = _split(watch, fresh)
         private, agencies = _without_agencies(published)
-        if private:
+        reduced = _lower_prices(watch.store, known_now)
+        if private or reduced:
             send_listings(
                 config,
-                private,
+                [*private, *reduced],
                 started,
                 source=watch.source,
                 period_start=previous or started,
                 period_end=started,
             )
-            watch.store.mark_sent(private, datetime.now(timezone.utc))
+            if private:
+                watch.store.mark_sent(private, datetime.now(timezone.utc))
         watch.store.remember([*renewed, *agencies])
+        seen_at = datetime.now(timezone.utc)
+        for item in _unique([*private, *agencies, *renewed, *known_now]):
+            watch.store.record_price(item, seen_at)
         watch.store.set_last_success(started)
+        lines = _check_lines(
+            len(private),
+            [item.url for item in renewed],
+            [item.url for item in agencies],
+            len(reduced),
+        )
     except (ScraperError, MailError, OSError):
         log.info("Provjera nije uspjela. Mail nije poslan.")
+        log.info("%s", RULE)
         return
     except Exception:
         log.info("Provjera nije uspjela. Mail nije poslan.")
         log.exception("Provjera nije uspjela.")
+        log.info("%s", RULE)
         return
-    for line in _check_lines(
-        len(private),
-        [item.url for item in renewed],
-        [item.url for item in agencies],
-    ):
+    for line in lines:
         log.info("%s", line)
+    log.info("%s", RULE)
+
+
+def _app_version() -> str:
+    return os.environ.get("APP_VERSION") or "dev"
+
+
+def _lower_prices(store: Store, listings: list[Listing]) -> list[Offer]:
+    chosen: list[Offer] = []
+    seen: set[int] = set()
+    for item in listings:
+        if item.code in seen or item.legal_entity or item.price is None:
+            continue
+        seen.add(item.code)
+        quoted = store.quote(item.code)
+        if quoted is None:
+            continue
+        previous, previous_m2 = quoted
+        if round(float(item.price), 2) < round(float(previous), 2):
+            chosen.append(Offer(item, previous, previous_m2))
+    return chosen
+
+
+def _unique(listings: list[Listing]) -> list[Listing]:
+    chosen: list[Listing] = []
+    seen: set[int] = set()
+    for item in listings:
+        if item.code in seen:
+            continue
+        seen.add(item.code)
+        chosen.append(item)
+    return chosen
 
 
 def _without_agencies(listings: list) -> tuple[list, list]:
@@ -208,20 +265,23 @@ RULE = "-----------------------------------------------------------"
 
 
 def _write_check_header(period: str, label: str) -> None:
-    log.info("%s", RULE)
     log.info("Počinjem provjeru za period %s, %s", period, label)
-    log.info("%s", RULE)
 
 
 def _check_lines(
     published: int,
     renewed_urls: list[str],
     agency_urls: list[str] | None = None,
+    lower_price_count: int = 0,
 ) -> list[str]:
     if published == 0:
         lines = ["Nema novih oglasa."]
     else:
         lines = [f"Novih oglasa: {published}. Mail je poslan."]
+    if lower_price_count == 1:
+        lines.append("Obnovljen s nižom cijenom: 1. Mail je poslan.")
+    elif lower_price_count > 1:
+        lines.append(f"Obnovljenih s nižom cijenom: {lower_price_count}. Mail je poslan.")
     lines.extend(_skipped_lines(
         renewed_urls,
         "Pronađen 1, nije poslan jer je ponovno objavljen:",

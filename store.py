@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +43,51 @@ class Store:
 
     def set_last_success(self, when: datetime) -> None:
         self._set_meta("last_success_at", _iso(when))
+
+    def price_sweep_version(self) -> str | None:
+        return self._meta("price_sweep_version")
+
+    def mark_price_sweep(self, version: str) -> None:
+        self._set_meta("price_sweep_version", version)
+
+    def quote(self, code: int) -> tuple[float, float | None] | None:
+        history = self._history(code)
+        if not history:
+            return None
+        last = history[-1]
+        if "price" not in last:
+            return None
+        per_m2 = last.get("price_m2")
+        return float(last["price"]), None if per_m2 is None else float(per_m2)
+
+    def record_price(self, listing: Listing, when: datetime) -> str:
+        history = self._history(listing.code)
+        if history is None or listing.price is None:
+            return "absent"
+        price = round(float(listing.price), 2)
+        per_m2 = None if listing.price_m2 is None else round(float(listing.price_m2), 2)
+        point = {"date": _iso(when), "price": price, "price_m2": per_m2}
+        if not history:
+            self._write_history(listing.code, [point])
+            return "first"
+        previous = round(float(history[-1]["price"]), 2)
+        if previous == price:
+            return "same"
+        history.append(point)
+        self._write_history(listing.code, history)
+        return "lower" if price < previous else "higher"
+
+    def backfill_prices(self, listings: list[Listing], when: datetime) -> int:
+        known = self.codes()
+        written = 0
+        seen: set[int] = set()
+        for listing in listings:
+            if listing.code not in known or listing.code in seen:
+                continue
+            seen.add(listing.code)
+            if self.record_price(listing, when) in {"first", "lower", "higher"}:
+                written += 1
+        return written
 
     def codes(self) -> set[int]:
         rows = self.conn.execute(
@@ -114,6 +160,7 @@ class Store:
         elif "source" not in columns:
             self._migrate_source()
         self._migrate_meta_keys()
+        self._ensure_price_history()
 
     def _create(self) -> None:
         self.conn.executescript(
@@ -126,6 +173,7 @@ class Store:
                 sent_at TEXT,
                 title TEXT NOT NULL,
                 url TEXT NOT NULL,
+                price_history TEXT,
                 PRIMARY KEY (source, code)
             );
             CREATE TABLE IF NOT EXISTS meta (
@@ -178,6 +226,36 @@ class Store:
                         (prefixed, str(row["value"])),
                     )
                 self.conn.execute("DELETE FROM meta WHERE key = ?", (key,))
+
+    def _ensure_price_history(self) -> None:
+        columns = [row[1] for row in self.conn.execute("PRAGMA table_info(seen)")]
+        if columns and "price_history" not in columns:
+            self.conn.execute("ALTER TABLE seen ADD COLUMN price_history TEXT")
+
+    def _history(self, code: int) -> list | None:
+        row = self.conn.execute(
+            "SELECT price_history FROM seen WHERE source = ? AND code = ?",
+            (self.source, code),
+        ).fetchone()
+        if row is None:
+            return None
+        raw = row["price_history"]
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(parsed, list):
+            return []
+        return parsed
+
+    def _write_history(self, code: int, history: list) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE seen SET price_history = ? WHERE source = ? AND code = ?",
+                (json.dumps(history, ensure_ascii=False), self.source, code),
+            )
 
     def _meta(self, name: str) -> str | None:
         row = self.conn.execute(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import smtplib
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from zoneinfo import ZoneInfo
@@ -23,6 +24,13 @@ class MailError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class Offer:
+    listing: Listing
+    previous_price: float | None = None
+    previous_price_m2: float | None = None
+
+
 def send_listings(
     config,
     listings: list[Listing],
@@ -33,23 +41,25 @@ def send_listings(
     period_start: datetime | None = None,
     period_end: datetime | None = None,
 ) -> None:
-    if not listings:
+    offers = _ordered(listings)
+    if not offers:
         return
-    count = len(listings)
-    note = test_note(count) if test else None
+    note = test_note(len(offers)) if test else None
+    reduced = sum(1 for item in offers if item.previous_price is not None)
     subject = report_subject(
-        count,
+        len(offers),
         source=source,
         period_start=period_start or checked_at,
         period_end=period_end or checked_at,
         test=test,
+        reduced=reduced,
     )
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = config.mail_from
     message["To"] = config.mail_to
-    message.set_content(render_plain(listings, checked_at, note, source=source), charset="utf-8")
-    message.add_alternative(render_html(listings, checked_at, note, source=source), subtype="html")
+    message.set_content(render_plain(offers, checked_at, note, source=source), charset="utf-8")
+    message.add_alternative(render_html(offers, checked_at, note, source=source), subtype="html")
     try:
         with connect(config) as smtp:
             smtp.send_message(message)
@@ -82,25 +92,23 @@ def render_plain(
     source: str = "index",
 ) -> str:
     ordered = _ordered(listings)
+    theme, _subtitle, summary = _copy(ordered, source)
     blocks = []
-    for listing in ordered:
-        per_m2 = format_price(listing.price_m2)
-        price = format_price(listing.price)
-        price_line = price if per_m2 == "—" else f"{price} ({per_m2}/m²)"
+    for offer in ordered:
+        listing = offer.listing
         blocks.append(
             "\n".join(
                 [
                     f"{listing.title} ({seller_label(listing.legal_entity)})",
-                    price_line,
+                    *_plain_price(offer),
                     format_location(listing),
                     listing.url,
                 ]
             )
         )
-    theme = _theme(source)
     header = (
         f"{theme['title']}\n"
-        f"{found_label(len(ordered))}\n"
+        f"{summary}\n"
         f"Provjera: {format_dt(checked_at)}"
     )
     if note:
@@ -115,8 +123,8 @@ def render_html(
     source: str = "index",
 ) -> str:
     ordered = _ordered(listings)
-    theme = _theme(source)
-    rows = "\n".join(_row(listing, theme["link"]) for listing in ordered)
+    theme, subtitle, summary = _copy(ordered, source)
+    rows = "\n".join(_row(offer, theme["link"]) for offer in ordered)
     note_html = ""
     if note:
         note_html = (
@@ -129,7 +137,7 @@ def render_html(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Novi oglasi</title>
+  <title>{html.escape(theme['title'])}</title>
 </head>
 <body style="margin:0;padding:0;background:#f3f4f6;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f3f4f6;">
@@ -139,12 +147,12 @@ def render_html(
           <tr>
             <td bgcolor="{theme['header']}" style="background:{theme['header']};padding:22px 28px;border-radius:16px 16px 0 0;">
               <div style="font-family:Arial,Helvetica,sans-serif;font-size:22px;line-height:1.3;font-weight:700;color:#ffffff;">{html.escape(theme['title'])}</div>
-              <div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.4;color:{theme['sub']};padding-top:6px;">Nove objave</div>
+              <div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.4;color:{theme['sub']};padding-top:6px;">{html.escape(subtitle)}</div>
             </td>
           </tr>
           <tr>
             <td style="padding:18px 28px 6px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.4;color:#6b7280;">
-              {html.escape(found_label(len(ordered)))}
+              {html.escape(summary)}
               {note_html}
             </td>
           </tr>
@@ -186,10 +194,18 @@ def report_subject(
     period_start: datetime,
     period_end: datetime,
     test: bool = False,
+    reduced: int = 0,
 ) -> str:
     name = "Plavi oglasnik" if source == "plavi" else "Index"
     unit = "komad" if count % 10 == 1 and count % 100 != 11 else "komada"
-    subject = f"Novi Oglasi {name} ({count} {unit}) - {_report_span(period_start, period_end)}"
+    span = _report_span(period_start, period_end)
+    fresh = count - reduced
+    if reduced and fresh:
+        subject = f"Novi i obnovljeni {name} ({count} {unit}) - {span}"
+    elif reduced:
+        subject = f"Obnovljeni oglasi, niža cijena {name} ({count} {unit}) - {span}"
+    else:
+        subject = f"Novi Oglasi {name} ({count} {unit}) - {span}"
     if test:
         return f"Test: {subject}"
     return subject
@@ -227,21 +243,22 @@ def _theme(source: str) -> dict[str, str]:
     }
 
 
-def _row(listing: Listing, link_color: str = "#1d4ed8") -> str:
+def _row(offer: Offer, link_color: str = "#1d4ed8") -> str:
+    listing = offer.listing
     title, url, location, price, per_m2, label = _bits(listing)
-    per_m2_html = ""
-    if per_m2 != "—":
-        per_m2_html = (
-            f'<div style="font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#9ca3af;padding-top:2px;">'
-            f"{per_m2}/m²</div>"
+    renewal = ""
+    if offer.previous_price is not None:
+        renewal = (
+            '<div style="font-size:12px;color:#b45309;padding-top:4px;">Obnova, niža cijena</div>'
         )
     return f"""<tr>
                   <td style="padding:14px 12px;border-bottom:1px solid #f3f4f6;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.4;color:#111827;vertical-align:top;">
                     {title}
                     <div style="font-size:12px;color:#6b7280;padding-top:2px;">{location} ({label})</div>
+                    {renewal}
                   </td>
                   <td style="padding:14px 12px;border-bottom:1px solid #f3f4f6;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#111827;white-space:nowrap;vertical-align:top;">
-                    {price}{per_m2_html}
+                    {_price_html(offer, price, per_m2)}
                   </td>
                   <td align="right" style="padding:14px 12px;border-bottom:1px solid #f3f4f6;vertical-align:top;white-space:nowrap;">
                     <a href="{url}" style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:{link_color};text-decoration:underline;">Otvori oglas</a>
@@ -260,8 +277,103 @@ def _bits(listing: Listing) -> tuple[str, str, str, str, str, str]:
     )
 
 
-def _ordered(listings: list[Listing]) -> list[Listing]:
-    return sorted(listings, key=lambda item: (item.price_m2 is None, item.price_m2 or 0, item.code))
+def _as_offer(item: Listing | Offer) -> Offer:
+    if isinstance(item, Offer):
+        return item
+    return Offer(item)
+
+
+def _ordered(listings: list[Listing | Offer]) -> list[Offer]:
+    return sorted(
+        [_as_offer(item) for item in listings],
+        key=lambda item: (
+            item.listing.price_m2 is None,
+            item.listing.price_m2 or 0,
+            item.listing.code,
+        ),
+    )
+
+
+def _copy(offers: list[Offer], source: str) -> tuple[dict[str, str], str, str]:
+    theme = dict(_theme(source))
+    fresh = sum(1 for item in offers if item.previous_price is None)
+    reduced = len(offers) - fresh
+    if fresh and reduced:
+        theme["title"] = (
+            "Oglasi – Plavi oglasnik" if source == "plavi" else "Oglasi – Index nekretnine"
+        )
+        return theme, "Nove objave i niže cijene", _mixed_label(fresh, reduced)
+    if reduced:
+        theme["title"] = (
+            "Obnovljeni oglasi – Plavi oglasnik"
+            if source == "plavi"
+            else "Obnovljeni oglasi – Index nekretnine"
+        )
+        return theme, "Niža cijena", _reduced_label(reduced)
+    return theme, "Nove objave", found_label(fresh)
+
+
+def _plain_price(offer: Offer) -> list[str]:
+    listing = offer.listing
+    if offer.previous_price is None:
+        per_m2 = format_price(listing.price_m2)
+        price = format_price(listing.price)
+        line = price if per_m2 == "—" else f"{price} ({per_m2}/m²)"
+        return [line]
+    old = format_price(offer.previous_price)
+    new = format_price(listing.price)
+    line = f"{old} → {new}"
+    if offer.previous_price_m2 is not None or listing.price_m2 is not None:
+        line += (
+            f" ({format_price(offer.previous_price_m2)}/m² → {format_price(listing.price_m2)}/m²)"
+        )
+    return ["Obnova, niža cijena", line]
+
+
+def _price_html(offer: Offer, price: str, per_m2: str) -> str:
+    if offer.previous_price is None:
+        extra = ""
+        if per_m2 != "—":
+            extra = (
+                '<div style="font-family:Arial,Helvetica,sans-serif;font-size:12px;'
+                f'color:#9ca3af;padding-top:2px;">{per_m2}/m²</div>'
+            )
+        return f"{price}{extra}"
+    old = html.escape(format_price(offer.previous_price))
+    lines = [
+        (
+            '<div style="font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#9ca3af;'
+            f'text-decoration:line-through;">{old}</div>'
+        ),
+        (
+            '<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;font-weight:700;'
+            f'color:#111827;">{price}</div>'
+        ),
+    ]
+    if offer.previous_price_m2 is not None:
+        old_m2 = html.escape(format_price(offer.previous_price_m2))
+        lines.append(
+            '<div style="font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#9ca3af;'
+            f'text-decoration:line-through;">{old_m2}/m²</div>'
+        )
+    if per_m2 != "—":
+        lines.append(
+            '<div style="font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:700;'
+            f'color:#6b7280;">{per_m2}/m²</div>'
+        )
+    return "".join(lines)
+
+
+def _reduced_label(count: int) -> str:
+    if count == 1:
+        return "Pronađen 1 obnovljen oglas s nižom cijenom."
+    return f"Pronađeno {count} obnovljenih oglasa s nižom cijenom."
+
+
+def _mixed_label(fresh: int, reduced: int) -> str:
+    if fresh == 1 and reduced == 1:
+        return "Pronađen 1 novi oglas i 1 obnovljen s nižom cijenom."
+    return f"Pronađeno {fresh} novih oglasa i {reduced} obnovljenih s nižom cijenom."
 
 
 def format_location(listing: Listing) -> str:

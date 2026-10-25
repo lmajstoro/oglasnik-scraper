@@ -182,7 +182,11 @@ def run_check(config: Config, watch: Watch) -> None:
         log.info("Provjera nije uspjela. Mail nije poslan.")
         log.exception("Provjera nije uspjela.")
         return
-    for line in _check_lines(len(private), [item.url for item in renewed]):
+    for line in _check_lines(
+        len(private),
+        [item.url for item in renewed],
+        [item.url for item in agencies],
+    ):
         log.info("%s", line)
 
 
@@ -209,20 +213,34 @@ def _write_check_header(period: str, label: str) -> None:
     log.info("%s", RULE)
 
 
-def _check_lines(published: int, renewed_urls: list[str]) -> list[str]:
+def _check_lines(
+    published: int,
+    renewed_urls: list[str],
+    agency_urls: list[str] | None = None,
+) -> list[str]:
     if published == 0:
         lines = ["Nema novih oglasa."]
     else:
         lines = [f"Novih oglasa: {published}. Mail je poslan."]
-    if not renewed_urls:
-        return lines
-    count = len(renewed_urls)
-    if count == 1:
-        lines.append("Pronađen 1, nije poslan jer je ponovno objavljen:")
-    else:
-        lines.append(f"Pronađeno {count}, nisu poslani jer su ponovno objavljeni:")
-    lines.extend(renewed_urls)
+    lines.extend(_skipped_lines(
+        renewed_urls,
+        "Pronađen 1, nije poslan jer je ponovno objavljen:",
+        "Pronađeno {count}, nisu poslani jer su ponovno objavljeni:",
+    ))
+    lines.extend(_skipped_lines(
+        agency_urls or [],
+        "Pronađen 1, nije poslan jer je agencijski:",
+        "Pronađeno {count}, nisu poslani jer su agencijski:",
+    ))
     return lines
+
+
+def _skipped_lines(urls: list[str], one: str, many: str) -> list[str]:
+    if not urls:
+        return []
+    count = len(urls)
+    header = one if count == 1 else many.format(count=count)
+    return [header, *urls]
 
 
 def _period_label(previous: datetime | None, started: datetime) -> str:

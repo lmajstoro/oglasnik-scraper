@@ -134,6 +134,33 @@ class FormatTests(unittest.TestCase):
                 link,
             ],
         )
+        self.assertEqual(
+            _check_lines(0, [], [link]),
+            [
+                "Nema novih oglasa.",
+                "Pronađen 1, nije poslan jer je agencijski:",
+                link,
+            ],
+        )
+        self.assertEqual(
+            _check_lines(1, [link], [other]),
+            [
+                "Novih oglasa: 1. Mail je poslan.",
+                "Pronađen 1, nije poslan jer je ponovno objavljen:",
+                link,
+                "Pronađen 1, nije poslan jer je agencijski:",
+                other,
+            ],
+        )
+        self.assertEqual(
+            _check_lines(0, [], [link, other]),
+            [
+                "Nema novih oglasa.",
+                "Pronađeno 2, nisu poslani jer su agencijski:",
+                link,
+                other,
+            ],
+        )
 
     def test_period_is_zagreb_clock(self):
         previous = datetime(2026, 10, 22, 11, 13, tzinfo=timezone.utc)

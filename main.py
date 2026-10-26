@@ -7,10 +7,10 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, time as clock, timedelta, timezone
+from datetime import date, datetime, time as clock, timedelta, timezone
 from pathlib import Path
 
-from mailer import ZAGREB, MailError, Offer, check_smtp, send_listings
+from mailer import DIGEST_TO, ZAGREB, MailError, Offer, check_smtp, send_digest, send_listings
 from plavi import PlaviClient, classify_plavi
 from scraper import IndexClient, Listing, ScraperError, is_renewal
 from store import PLAVI, INDEX, Store
@@ -65,11 +65,15 @@ def main() -> None:
     log.info("Interval provjere je %s min.", config.interval_minutes)
     log.info("Nema provjera od 00:00 do 08:00.")
     log.info("Agencijski oglasi se ne šalju.")
+    log.info("Dnevni izvještaj u 00:00 ide samo na %s.", DIGEST_TO)
+    watches[0].store.note_stats_since(_as_zagreb(datetime.now(timezone.utc)).date().isoformat())
     try:
         while True:
             _wait_out_quiet_hours()
+            cycle_started = datetime.now(timezone.utc)
             for watch in watches:
-                _run_watch(config, watch)
+                _run_watch(config, watch, cycle_started)
+            _maybe_send_digest(config, watches[0].store, watches[1].store, cycle_started)
             _wait_for_next_check(interval)
     except KeyboardInterrupt:
         log.info("Zaustavljeno.")
@@ -78,7 +82,7 @@ def main() -> None:
             watch.store.close()
 
 
-def _run_watch(config: Config, watch: Watch) -> None:
+def _run_watch(config: Config, watch: Watch, stats_at: datetime) -> None:
     try:
         if not watch.store.baseline_complete():
             run_baseline(watch)
@@ -87,7 +91,7 @@ def _run_watch(config: Config, watch: Watch) -> None:
         if not watch.store.test_sent():
             send_test(config, watch)
         else:
-            run_check(config, watch)
+            run_check(config, watch, stats_at)
     except KeyboardInterrupt:
         raise
     except (ScraperError, MailError, OSError) as exc:
@@ -167,7 +171,7 @@ def _sample_listings(client: IndexClient | PlaviClient, count: int) -> list:
     return found
 
 
-def run_check(config: Config, watch: Watch) -> None:
+def run_check(config: Config, watch: Watch, stats_at: datetime | None = None) -> None:
     started = datetime.now(timezone.utc)
     previous = watch.store.last_success()
     period = _period_label(previous, started)
@@ -191,10 +195,12 @@ def run_check(config: Config, watch: Watch) -> None:
             )
             if private:
                 watch.store.mark_sent(private, datetime.now(timezone.utc))
-        watch.store.remember([*renewed, *agencies])
+        skipped = watch.store.remember([*renewed, *agencies])
         seen_at = datetime.now(timezone.utc)
         for item in _unique([*private, *agencies, *renewed, *known_now]):
             watch.store.record_price(item, seen_at)
+        sent_count = len(private) + len(reduced) if private or reduced else 0
+        watch.store.add_daily(_stats_day(stats_at or started), sent_count, skipped)
         watch.store.set_last_success(started)
         lines = _check_lines(
             len(private),
@@ -214,6 +220,82 @@ def run_check(config: Config, watch: Watch) -> None:
     for line in lines:
         log.info("%s", line)
     log.info("%s", RULE)
+
+
+def _maybe_send_digest(
+    config: Config,
+    index_store: Store,
+    plavi_store: Store,
+    cycle_started: datetime,
+) -> None:
+    local = _as_zagreb(cycle_started)
+    if (local.hour, local.minute) != (0, 0):
+        return
+    closed = _stats_day(cycle_started)
+    if index_store.digest_sent_for() == closed:
+        log.info("Dnevni izvještaj za %s je već poslan.", _dotted(closed))
+        return
+    end = date.fromisoformat(closed)
+    start = end - timedelta(days=29)
+    rows = _digest_rows(index_store, plavi_store, start, end)
+    since = index_store.stats_since()
+    try:
+        send_digest(
+            config,
+            rows,
+            start,
+            end,
+            local,
+            date.fromisoformat(since) if since else None,
+        )
+    except (MailError, OSError) as exc:
+        log.error("Dnevni izvještaj nije poslan: %s", exc)
+        return
+    except Exception:
+        log.exception("Dnevni izvještaj nije poslan.")
+        return
+    index_store.mark_digest_sent(closed)
+    log.info("Dnevni izvještaj poslan na %s.", DIGEST_TO)
+
+
+def _digest_rows(
+    index_store: Store,
+    plavi_store: Store,
+    start: date,
+    end: date,
+) -> list[dict]:
+    index = index_store.daily_totals(start.isoformat(), end.isoformat())
+    plavi = plavi_store.daily_totals(start.isoformat(), end.isoformat())
+    rows = []
+    day = start
+    while day <= end:
+        key = day.isoformat()
+        index_sent, index_skipped = index.get(key, (0, 0))
+        plavi_sent, plavi_skipped = plavi.get(key, (0, 0))
+        rows.append(
+            {
+                "day": day,
+                "index_sent": index_sent,
+                "index_skipped": index_skipped,
+                "plavi_sent": plavi_sent,
+                "plavi_skipped": plavi_skipped,
+            }
+        )
+        day += timedelta(days=1)
+    return rows
+
+
+def _stats_day(when: datetime) -> str:
+    """Ponoć je zadnja provjera dana koji je upravo završio."""
+    local = _as_zagreb(when)
+    if local.hour == 0 and local.minute == 0:
+        local -= timedelta(days=1)
+    return local.date().isoformat()
+
+
+def _dotted(day: str) -> str:
+    year, month, day_no = day.split("-")
+    return f"{day_no}.{month}.{year}."
 
 
 def _app_version() -> str:

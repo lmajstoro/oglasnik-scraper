@@ -89,6 +89,44 @@ class Store:
                 written += 1
         return written
 
+    def add_daily(self, day: str, sent: int, skipped: int) -> None:
+        if sent == 0 and skipped == 0:
+            return
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO daily (source, day, sent, skipped)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(source, day) DO UPDATE SET
+                    sent = sent + excluded.sent,
+                    skipped = skipped + excluded.skipped
+                """,
+                (self.source, day, sent, skipped),
+            )
+
+    def daily_totals(self, start: str, end: str) -> dict[str, tuple[int, int]]:
+        rows = self.conn.execute(
+            """
+            SELECT day, sent, skipped FROM daily
+            WHERE source = ? AND day >= ? AND day <= ?
+            """,
+            (self.source, start, end),
+        ).fetchall()
+        return {str(row["day"]): (int(row["sent"]), int(row["skipped"])) for row in rows}
+
+    def digest_sent_for(self) -> str | None:
+        return self._global_meta("digest_sent_for")
+
+    def mark_digest_sent(self, day: str) -> None:
+        self._set_global_meta("digest_sent_for", day)
+
+    def stats_since(self) -> str | None:
+        return self._global_meta("stats_since")
+
+    def note_stats_since(self, day: str) -> None:
+        if self.stats_since() is None:
+            self._set_global_meta("stats_since", day)
+
     def codes(self) -> set[int]:
         rows = self.conn.execute(
             "SELECT code FROM seen WHERE source = ?",
@@ -161,6 +199,7 @@ class Store:
             self._migrate_source()
         self._migrate_meta_keys()
         self._ensure_price_history()
+        self._ensure_daily()
 
     def _create(self) -> None:
         self.conn.executescript(
@@ -226,6 +265,36 @@ class Store:
                         (prefixed, str(row["value"])),
                     )
                 self.conn.execute("DELETE FROM meta WHERE key = ?", (key,))
+
+    def _ensure_daily(self) -> None:
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily (
+                source TEXT NOT NULL,
+                day TEXT NOT NULL,
+                sent INTEGER NOT NULL DEFAULT 0,
+                skipped INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (source, day)
+            )
+            """
+        )
+
+    def _global_meta(self, name: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT value FROM meta WHERE key = ?",
+            (name,),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row["value"])
+
+    def _set_global_meta(self, name: str, value: str) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (name, value),
+            )
 
     def _ensure_price_history(self) -> None:
         columns = [row[1] for row in self.conn.execute("PRAGMA table_info(seen)")]

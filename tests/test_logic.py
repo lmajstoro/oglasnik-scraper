@@ -3,18 +3,31 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from mailer import Offer, format_dt, format_price, render_html, render_plain, report_subject
+from mailer import (
+    DIGEST_TO,
+    Offer,
+    _digest_html,
+    digest_subject,
+    format_dt,
+    format_price,
+    render_html,
+    render_plain,
+    report_subject,
+)
 from main import (
     _ZagrebFormatter,
     _check_lines,
+    _digest_rows,
     _lower_prices,
     _period_label,
+    _stats_day,
     _without_agencies,
     in_night_pause,
     next_check_at,
@@ -526,6 +539,88 @@ class PlaviParseTests(unittest.TestCase):
         self.assertEqual(item.price, 100000)
         self.assertEqual(item.area, 50)
         self.assertEqual(item.price_m2, 2000)
+
+
+class DigestTests(unittest.TestCase):
+    def test_midnight_check_belongs_to_the_day_that_just_ended(self):
+        self.assertEqual(_stats_day(_zagreb(2026, 10, 27, 0, 0)), "2026-10-26")
+        self.assertEqual(_stats_day(_zagreb(2026, 10, 26, 23, 55)), "2026-10-26")
+        self.assertEqual(_stats_day(_zagreb(2026, 10, 27, 8, 0)), "2026-10-27")
+
+    def test_digest_subject_and_recipient_are_separate_from_listing_mail(self):
+        self.assertEqual(DIGEST_TO, "luka.majstorovic321@gmail.com")
+        self.assertEqual(
+            digest_subject(_zagreb(2026, 10, 27, 0, 0)),
+            "Dnevni izvještaj (30 dana) - 27.10.2026 00:00",
+        )
+
+    def test_digest_shows_each_day_and_the_cumulative(self):
+        end = date(2026, 10, 26)
+        start = end - timedelta(days=29)
+        rows = []
+        day = start
+        while day <= end:
+            rows.append(
+                {
+                    "day": day,
+                    "index_sent": 1 if day == end else 0,
+                    "index_skipped": 2 if day == end else 0,
+                    "plavi_sent": 0,
+                    "plavi_skipped": 4 if day == end else 0,
+                }
+            )
+            day += timedelta(days=1)
+        config = SimpleNamespace(
+            interval_minutes=5,
+            page_delay_seconds=0.3,
+            mail_to="luka.majstorovic321@gmail.com, lovronaglic@hotmail.com",
+        )
+        body = _digest_html(
+            config,
+            rows,
+            start,
+            end,
+            _zagreb(2026, 10, 27, 0, 0),
+            date(2026, 10, 26),
+        )
+        self.assertIn("27.09.2026. – 26.10.2026.", body)
+        self.assertIn("1 poslano", body)
+        self.assertIn("6 odbačeno", body)
+        self.assertIn("Kumulativ", body)
+        self.assertIn("Brojanje je počelo 26.10.2026.", body)
+        self.assertIn("samo na luka.majstorovic321@gmail.com", body)
+        self.assertIn("lovronaglic@hotmail.com", body)
+        self.assertIn("legalEntity", body)
+        self.assertIn("trgovina", body)
+        self.assertIn("#e30613", body)
+        self.assertIn("#0E6EB8", body)
+        self.assertNotIn("nisu iz baze", body)
+
+    def test_daily_counts_stay_on_their_source(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / "seen.sqlite")
+            index = Store(path, "index")
+            plavi = Store(path, "plavi")
+            index.add_daily("2026-10-26", 1, 2)
+            index.add_daily("2026-10-26", 1, 0)
+            index.add_daily("2026-10-26", 0, 0)
+            plavi.add_daily("2026-10-26", 3, 4)
+            end = date(2026, 10, 26)
+            start = end - timedelta(days=29)
+            rows = _digest_rows(index, plavi, start, end)
+            self.assertEqual(len(rows), 30)
+            self.assertEqual(rows[-1]["index_sent"], 2)
+            self.assertEqual(rows[-1]["index_skipped"], 2)
+            self.assertEqual(rows[-1]["plavi_sent"], 3)
+            self.assertEqual(rows[-1]["plavi_skipped"], 4)
+            self.assertEqual(rows[0]["index_sent"], 0)
+            index.note_stats_since("2026-10-26")
+            index.note_stats_since("2026-10-01")
+            self.assertEqual(plavi.stats_since(), "2026-10-26")
+            index.mark_digest_sent("2026-10-26")
+            self.assertEqual(plavi.digest_sent_for(), "2026-10-26")
+            index.close()
+            plavi.close()
 
 
 if __name__ == "__main__":

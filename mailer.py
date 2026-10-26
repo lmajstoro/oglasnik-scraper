@@ -5,13 +5,16 @@ from __future__ import annotations
 import html
 import smtplib
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from email.message import EmailMessage
 from zoneinfo import ZoneInfo
 
-from scraper import Listing
+from plavi import SEARCH_URL as PLAVI_SEARCH_BASE
+from scraper import COUNTY_IDS, Listing
 
 ZAGREB = ZoneInfo("Europe/Zagreb")
+DIGEST_TO = "luka.majstorovic321@gmail.com"
+_WEEKDAYS = ("pon", "uto", "sri", "čet", "pet", "sub", "ned")
 TEST_NOTE_ONE = (
     "Ovo je testni oglas. Služi samo za provjeru da mail stiže i neće se poslati ponovo."
 )
@@ -461,3 +464,266 @@ class _SmtpGuard:
             self.smtp.quit()
         except smtplib.SMTPException:
             self.smtp.close()
+
+
+def send_digest(config, rows: list[dict], start: date, end: date, sent_at: datetime, stats_since: date | None) -> None:
+    subject = digest_subject(sent_at)
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = config.mail_from
+    message["To"] = DIGEST_TO
+    message.set_content(_digest_plain(config, rows, start, end, stats_since), charset="utf-8")
+    message.add_alternative(
+        _digest_html(config, rows, start, end, sent_at, stats_since),
+        subtype="html",
+    )
+    try:
+        with connect(config) as smtp:
+            smtp.send_message(message)
+    except MailError:
+        raise
+    except smtplib.SMTPException as exc:
+        raise MailError(f"Slanje dnevnog izvještaja nije uspjelo: {exc}") from exc
+
+
+def digest_subject(sent_at: datetime) -> str:
+    local = _as_zagreb(sent_at)
+    return f"Dnevni izvještaj (30 dana) - {local:%d.%m.%Y} {local:%H:%M}"
+
+
+def index_search_url() -> str:
+    counties = "&".join(f"includeCountyIds={county}" for county in COUNTY_IDS)
+    return (
+        "https://www.index.hr/oglasi/nekretnine/prodaja-stanova/pretraga"
+        "?category=flats-for-sale&module=real-estate&sortOption=4"
+        f"&useRelevancyScoreSort=false&{counties}"
+    )
+
+
+def plavi_search_url() -> str:
+    return f"{PLAVI_SEARCH_BASE}?f[4][7442]=true&f[4][7760]=true"
+
+
+def _digest_html(config, rows: list[dict], start: date, end: date, sent_at: datetime, stats_since: date | None) -> str:
+    totals = _digest_totals(rows)
+    both_sent = totals["index_sent"] + totals["plavi_sent"]
+    both_skipped = totals["index_skipped"] + totals["plavi_skipped"]
+    table_rows = "\n".join(_digest_day_row(row, index) for index, row in enumerate(rows))
+    since_html = _since_note(stats_since, start)
+    local = _as_zagreb(sent_at)
+    return f"""<!DOCTYPE html>
+<html lang="hr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dnevni izvještaj</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f4f6;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f3f4f6;">
+    <tr>
+      <td align="center" style="padding:24px 12px;">
+        <table role="presentation" width="680" cellpadding="0" cellspacing="0" style="width:100%;max-width:680px;background:#ffffff;border:1px solid #e5e7eb;border-radius:16px;">
+          <tr>
+            <td bgcolor="#111827" style="background:#111827;padding:22px 28px;border-radius:16px 16px 0 0;">
+              <div style="font-family:Arial,Helvetica,sans-serif;font-size:22px;line-height:1.3;font-weight:700;color:#ffffff;">Dnevni izvještaj</div>
+              <div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.4;color:#d1d5db;padding-top:6px;">{_day_span(start, end)} · poslano u {local:%H:%M}</div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:16px 20px 4px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  {_digest_stat("Index poslano", totals["index_sent"], "#e30613")}
+                  {_digest_stat("Index odbačeno", totals["index_skipped"], "#9ca3af")}
+                  {_digest_stat("Plavi poslano", totals["plavi_sent"], "#0E6EB8")}
+                  {_digest_stat("Plavi odbačeno", totals["plavi_skipped"], "#9ca3af")}
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:8px 28px 4px;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.45;color:#6b7280;">
+              Kumulativ 30 dana, oba izvora: <strong style="color:#111827;">{both_sent} poslano</strong>, {both_skipped} odbačeno.
+              Poslano su novi privatni oglasi i obnove s nižom cijenom. Odbačeno su obnove i agencije, zajedno.
+              {since_html}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:12px 16px 8px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td rowspan="2" style="padding:8px 10px;border-bottom:1px solid #e5e7eb;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#9ca3af;">Dan</td>
+                  <td colspan="2" style="padding:8px 8px 2px;font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:700;color:#e30613;">Index</td>
+                  <td colspan="2" style="padding:8px 8px 2px;font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:700;color:#0E6EB8;">Plavi oglasnik</td>
+                </tr>
+                <tr>
+                  <td style="padding:2px 8px 8px;border-bottom:1px solid #e5e7eb;font-family:Arial,Helvetica,sans-serif;font-size:11px;color:#9ca3af;">Poslano</td>
+                  <td style="padding:2px 8px 8px;border-bottom:1px solid #e5e7eb;font-family:Arial,Helvetica,sans-serif;font-size:11px;color:#9ca3af;">Odbačeno</td>
+                  <td style="padding:2px 8px 8px;border-bottom:1px solid #e5e7eb;font-family:Arial,Helvetica,sans-serif;font-size:11px;color:#9ca3af;">Poslano</td>
+                  <td style="padding:2px 8px 8px;border-bottom:1px solid #e5e7eb;font-family:Arial,Helvetica,sans-serif;font-size:11px;color:#9ca3af;">Odbačeno</td>
+                </tr>
+                {table_rows}
+                <tr>
+                  <td style="padding:10px;border-top:1px solid #e5e7eb;font-family:Arial,Helvetica,sans-serif;font-size:13px;font-weight:700;color:#111827;background:#f9fafb;">Kumulativ</td>
+                  <td style="padding:10px 8px;border-top:1px solid #e5e7eb;font-family:Arial,Helvetica,sans-serif;font-size:13px;font-weight:700;color:#111827;background:#f9fafb;">{totals["index_sent"]}</td>
+                  <td style="padding:10px 8px;border-top:1px solid #e5e7eb;font-family:Arial,Helvetica,sans-serif;font-size:13px;font-weight:700;color:#111827;background:#f9fafb;">{totals["index_skipped"]}</td>
+                  <td style="padding:10px 8px;border-top:1px solid #e5e7eb;font-family:Arial,Helvetica,sans-serif;font-size:13px;font-weight:700;color:#111827;background:#f9fafb;">{totals["plavi_sent"]}</td>
+                  <td style="padding:10px 8px;border-top:1px solid #e5e7eb;font-family:Arial,Helvetica,sans-serif;font-size:13px;font-weight:700;color:#111827;background:#f9fafb;">{totals["plavi_skipped"]}</td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:8px 28px 6px;font-family:Arial,Helvetica,sans-serif;font-size:16px;font-weight:700;color:#111827;">Postavke</td>
+          </tr>
+          <tr>
+            <td style="padding:0 28px 18px;">
+              {_digest_settings(config)}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:8px 28px 18px;border-top:1px solid #f3f4f6;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#9ca3af;">
+              Dnevni izvještaj ide samo na {html.escape(DIGEST_TO)}. Mailovi s oglasima idu na zasebnu listu.
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+"""
+
+
+def _digest_plain(config, rows: list[dict], start: date, end: date, stats_since: date | None) -> str:
+    totals = _digest_totals(rows)
+    lines = [
+        "Dnevni izvještaj",
+        _day_span(start, end),
+        f"Samo na {DIGEST_TO}",
+        "",
+        f"Kumulativ Index: {totals['index_sent']} poslano, {totals['index_skipped']} odbačeno",
+        f"Kumulativ Plavi: {totals['plavi_sent']} poslano, {totals['plavi_skipped']} odbačeno",
+    ]
+    note = _since_text(stats_since, start)
+    if note:
+        lines.extend(["", note])
+    lines.extend(["", "Dan | Index poslano | Index odbačeno | Plavi poslano | Plavi odbačeno"])
+    for row in rows:
+        day = row["day"]
+        lines.append(
+            f"{_WEEKDAYS[day.weekday()]} {day:%d.%m.} | {row['index_sent']} | "
+            f"{row['index_skipped']} | {row['plavi_sent']} | {row['plavi_skipped']}"
+        )
+    lines.extend(
+        [
+            "",
+            f"Interval: {config.interval_minutes} min",
+            "Noćna pauza: 00:00–08:00, zadnja provjera u 00:00.",
+            f"Mailovi s oglasima: {config.mail_to}",
+            f"Index: {index_search_url()}",
+            f"Plavi: {plavi_search_url()}",
+            "Agencije se ne šalju. Obnove se ne šalju, osim privatne obnove s nižom cijenom.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _digest_totals(rows: list[dict]) -> dict[str, int]:
+    keys = ("index_sent", "index_skipped", "plavi_sent", "plavi_skipped")
+    return {key: sum(row[key] for row in rows) for key in keys}
+
+
+def _digest_stat(label: str, value: int, color: str) -> str:
+    return (
+        '<td width="25%" valign="top" style="padding:0 6px;">'
+        f'<div style="border-top:3px solid {color};background:#f9fafb;padding:12px 10px;">'
+        f'<div style="font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#6b7280;">{html.escape(label)}</div>'
+        f'<div style="font-family:Arial,Helvetica,sans-serif;font-size:26px;line-height:1.2;font-weight:700;color:#111827;padding-top:4px;">{value}</div>'
+        "</div></td>"
+    )
+
+
+def _digest_day_row(row: dict, index: int) -> str:
+    day = row["day"]
+    background = "#ffffff" if index % 2 == 0 else "#f9fafb"
+    label = f"{_WEEKDAYS[day.weekday()]} {day:%d.%m.}"
+    cells = (
+        _digest_count(row["index_sent"], background, emphasize=True),
+        _digest_count(row["index_skipped"], background, emphasize=False),
+        _digest_count(row["plavi_sent"], background, emphasize=True),
+        _digest_count(row["plavi_skipped"], background, emphasize=False),
+    )
+    return (
+        "<tr>"
+        f'<td style="padding:6px 10px;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#111827;background:{background};">{label}</td>'
+        + "".join(cells)
+        + "</tr>"
+    )
+
+
+def _digest_count(value: int, background: str, emphasize: bool) -> str:
+    color = "#111827" if value else "#d1d5db"
+    weight = "700" if emphasize and value else "400"
+    return (
+        f'<td style="padding:6px 8px;font-family:Arial,Helvetica,sans-serif;font-size:13px;'
+        f'font-weight:{weight};color:{color};background:{background};">{value}</td>'
+    )
+
+
+def _digest_settings(config) -> str:
+    rows = [
+        ("Interval", f"{config.interval_minutes} min"),
+        ("Noćna pauza", "Nema provjera od 00:00 do 08:00. Zadnja provjera je u 00:00."),
+        ("Ovaj izvještaj", f"Svaki dan u 00:00, zadnjih 30 dana, samo na {DIGEST_TO}."),
+        ("Mailovi s oglasima", config.mail_to),
+        ("Vrijeme", "Europe/Zagreb"),
+        ("Pauza stranica", f"{config.page_delay_seconds:g} s"),
+        ("Index dohvat", index_search_url()),
+        ("Index područje", "Zagrebačka i Grad Zagreb, samo prodaja stanova, najnovije."),
+        ("Index novo", "Kod nije viđen i oglas nema vrijeme obnove."),
+        ("Index obnova", "Pamti se i ne šalje se. Iznimka je privatni oglas s nižom cijenom."),
+        ("Index agencija", "legalEntity = da. Ne šalje se."),
+        ("Plavi dohvat", plavi_search_url()),
+        ("Plavi područje", "Grad Zagreb (7442) i Zagrebačka (7760), samo prodaja stanova."),
+        ("Plavi novo", "Kod je veći od najvećeg dosad viđenog."),
+        ("Plavi obnova", "Manji nepoznati kod se pamti i ne šalje se, osim niže cijene kod privatnog."),
+        ("Plavi agencija", "user.type = trgovina. Ne šalje se."),
+        ("Redoslijed u mailu", "Po €/m², od najniže. Jedan mail po izvoru. Prazan ciklus ne šalje mail."),
+    ]
+    body = []
+    for label, value in rows:
+        shown = html.escape(value)
+        if value.startswith("http"):
+            shown = (
+                f'<a href="{html.escape(value, quote=True)}" '
+                f'style="color:#1d4ed8;text-decoration:underline;">{shown}</a>'
+            )
+        body.append(
+            "<tr>"
+            f'<td valign="top" style="padding:7px 12px 7px 0;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#6b7280;white-space:nowrap;">{html.escape(label)}</td>'
+            f'<td valign="top" style="padding:7px 0;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.4;color:#111827;word-break:break-all;">{shown}</td>'
+            "</tr>"
+        )
+    return (
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0">'
+        + "".join(body)
+        + "</table>"
+    )
+
+
+def _since_note(stats_since: date | None, start: date) -> str:
+    text = _since_text(stats_since, start)
+    if not text:
+        return ""
+    return f"<div style=\"padding-top:6px;\">{html.escape(text)}</div>"
+
+
+def _since_text(stats_since: date | None, start: date) -> str:
+    if stats_since is None or stats_since <= start:
+        return ""
+    return f"Brojanje je počelo {stats_since:%d.%m.%Y.}. Dani prije toga su 0."
+
+
+def _day_span(start: date, end: date) -> str:
+    return f"{start:%d.%m.%Y.} – {end:%d.%m.%Y.}"
